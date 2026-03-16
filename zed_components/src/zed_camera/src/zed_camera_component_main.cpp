@@ -5803,17 +5803,21 @@ void ZedCamera::publishOdomTF(rclcpp::Time t)
     mUsePubTimestamps ? get_clock()->now() :
     (t + rclcpp::Duration(0, mTfOffset * 1e9));
 
-  // RCLCPP_INFO_STREAM(get_logger(), "Odom TS: " <<
-  // transformStamped.header.stamp);
+  // Invert the transform and swap parent/child frames.
+  const tf2::Transform base2OdomTransf = mOdom2BaseTransf.inverse();
 
-  transformStamped.header.frame_id = mOdomFrameId;
-  transformStamped.child_frame_id = mBaseFrameId;
-  // conversion from Tranform to message
-  tf2::Vector3 translation = mOdom2BaseTransf.getOrigin();
-  tf2::Quaternion quat = mOdom2BaseTransf.getRotation();
+  // Swap frames: original parent=mOdomFrameId, child=mBaseFrameId
+  transformStamped.header.frame_id = mBaseFrameId;   // new parent
+  transformStamped.child_frame_id  = mOdomFrameId;   // new child
+
+  // Fill message from inverted transform
+  const tf2::Vector3     translation = base2OdomTransf.getOrigin();
+  const tf2::Quaternion  quat        = base2OdomTransf.getRotation();
+
   transformStamped.transform.translation.x = translation.x();
   transformStamped.transform.translation.y = translation.y();
   transformStamped.transform.translation.z = translation.z();
+
   transformStamped.transform.rotation.x = quat.x();
   transformStamped.transform.rotation.y = quat.y();
   transformStamped.transform.rotation.z = quat.z();
@@ -5877,11 +5881,18 @@ void ZedCamera::publishPoseTF(rclcpp::Time t)
   transformStamped.header.stamp =
     mUsePubTimestamps ? get_clock()->now() :
     (t + rclcpp::Duration(0, mTfOffset * 1e9));
-  transformStamped.header.frame_id = mMapFrameId;
-  transformStamped.child_frame_id = mOdomFrameId;
-  // conversion from Tranform to message
-  tf2::Vector3 translation = mMap2OdomTransf.getOrigin();
-  tf2::Quaternion quat = mMap2OdomTransf.getRotation();
+
+  // Invert the transform and swap parent/child frames.
+  const tf2::Transform odom2MapTransf = mMap2OdomTransf.inverse();
+
+  // Swap frames: original parent=mMapFrameId, child=mOdomFrameId
+  transformStamped.header.frame_id = mOdomFrameId;   // new parent
+  transformStamped.child_frame_id  = mMapFrameId;    // new child
+
+  // Fill message from inverted transform
+  const tf2::Vector3    translation = odom2MapTransf.getOrigin();
+  const tf2::Quaternion quat        = odom2MapTransf.getRotation();
+
   transformStamped.transform.translation.x = translation.x();
   transformStamped.transform.translation.y = translation.y();
   transformStamped.transform.translation.z = translation.z();
