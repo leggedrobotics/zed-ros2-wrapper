@@ -69,6 +69,13 @@ default_xacro_path = os.path.join(
     'zed_descr.urdf.xacro'
 )
 
+# RViz configuration file
+default_rviz_config_path = os.path.join(
+    get_package_share_directory('zed_wrapper'),
+    'rviz2',
+    'zed.rviz'
+)
+
 # Function to parse array-like launch arguments
 def parse_array_param(param):
     cleaned = param.replace('[', '').replace(']', '').replace(' ', '')
@@ -370,9 +377,7 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 'rviz_config',
-                default_value=TextSubstitution(
-                    text='/home/tutuna/colcon_ws/src/zed-ros2-wrapper/zed_wrapper/rviz2/zed.rviz'
-                ),
+                default_value=TextSubstitution(text=default_rviz_config_path),
                 description='Absolute path to the RViz2 configuration file.'
             ),
 

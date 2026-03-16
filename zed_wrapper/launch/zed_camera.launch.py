@@ -61,9 +61,16 @@ default_custom_object_detection_config_path = os.path.join(
 
 # URDF/xacro file to be loaded by the Robot State Publisher node
 default_xacro_path = os.path.join(
-    get_package_share_directory('zed_description'),
+    get_package_share_directory('zed_wrapper'),
     'urdf',
     'zed_descr.urdf.xacro'
+)
+
+# RViz configuration file
+default_rviz_config_path = os.path.join(
+    get_package_share_directory('zed_wrapper'),
+    'rviz2',
+    'zed.rviz'
 )
 
 # Function to parse array-like launch arguments
@@ -380,6 +387,16 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
+            # RViz-related launch arguments
+            DeclareLaunchArgument(
+                'rviz',
+                default_value='true',
+                description='If true, start RViz2 with the specified configuration.',
+                choices=['true', 'false']),
+            DeclareLaunchArgument(
+                'rviz_config',
+                default_value=TextSubstitution(text=default_rviz_config_path),
+                description='Absolute path to the RViz2 configuration file.'),
             # Declare launch arguments
             DeclareLaunchArgument(
                 'node_log_type',
