@@ -104,7 +104,7 @@ void ZedCamera::initVideoDepthPublishers()
         } catch (...) {
           RCLCPP_ERROR(get_logger(), "Unknown error while getting declared transports");
         }
-        
+
         for (const auto & transport : transports) {
           std::string transport_copy = transport;
           auto pos = transport_copy.find('/');
@@ -468,31 +468,36 @@ void ZedCamera::getDepthParams()
     shared_from_this(), "depth.depth_mode", depth_mode_str,
     depth_mode_str);
 
-  bool matched = false;
-  for (int mode = static_cast<int>(sl::DEPTH_MODE::NONE);
-    mode < static_cast<int>(sl::DEPTH_MODE::LAST); ++mode)
-  {
-    std::string test_str =
-      sl::toString(static_cast<sl::DEPTH_MODE>(mode)).c_str();
-    std::replace(
-      test_str.begin(), test_str.end(), ' ',
-      '_');    // Replace spaces with underscores to match the YAML setting
-    if (test_str == depth_mode_str) {
-      matched = true;
-      mDepthMode = static_cast<sl::DEPTH_MODE>(mode);
+  // Check for model override syntax: e.g. 'NEURAL_LIGHT:neural_depth_light_5.3.model'
+  // Supported separators: ':', ',', ';'
+  mDepthModelOverride.clear();
+  for (char sep : {':', ',', ';'}) {
+    auto pos = depth_mode_str.find(sep);
+    if (pos != std::string::npos) {
+      mDepthModelOverride = depth_mode_str.substr(pos + 1);
+      depth_mode_str = depth_mode_str.substr(0, pos);
       break;
     }
   }
 
-  if (!matched) {
+  if (!sl_tools::matchSdkEnum(
+      depth_mode_str, sl::DEPTH_MODE::NONE,
+      sl::DEPTH_MODE::LAST, mDepthMode))
+  {
     mDepthMode = sl::DEPTH_MODE::NEURAL;
-    if (depth_mode_str != "NEURAL_LIGHT") {
+    if (sl_tools::toUpper(depth_mode_str) != "NEURAL_LIGHT") {
       RCLCPP_WARN(
         get_logger(),
         "The parameter 'depth.depth_mode' contains a not valid string. "
         "Please check it in 'common_stereo.yaml'.");
       RCLCPP_WARN_STREAM(get_logger(), "Using default value: " << sl::toString(mDepthMode).c_str());
     }
+  }
+
+  if (!mDepthModelOverride.empty()) {
+    RCLCPP_INFO_STREAM(
+      get_logger(),
+      " * Depth model override: " << mDepthModelOverride);
   }
 
   if (mDepthMode == sl::DEPTH_MODE::NONE) {
@@ -528,7 +533,8 @@ void ZedCamera::getDepthParams()
     sl_tools::getParam(
       shared_from_this(), "depth.depth_stabilization",
       mDepthStabilization, mDepthStabilization,
-      " * Depth Stabilization: ", false, 0, 100);
+      " * Depth Stabilization: ", false, -1, 100);
+    // -1 means use SDK default (mInitParams keeps its constructed default value)
 
     if (_nitrosDisabled) {
       sl_tools::getParam(
@@ -543,7 +549,10 @@ void ZedCamera::getDepthParams()
 
     sl_tools::getParam(
       shared_from_this(), "depth.point_cloud_freq", mPcPubRate,
-      mPcPubRate, "", true, 0.1, static_cast<double>(mCamGrabFrameRate));
+      mPcPubRate, "", true, -1.0, static_cast<double>(mCamGrabFrameRate));
+    if (mPcPubRate <= 0.0) {
+      mPcPubRate = static_cast<double>(mCamGrabFrameRate);
+    }
     RCLCPP_INFO_STREAM(
       get_logger(),
       " * Point cloud rate [Hz]: " << mPcPubRate);
@@ -960,7 +969,7 @@ void ZedCamera::applyDepthSettings()
 
 void ZedCamera::applyVideoSettings()
 {
-  if (!mSvoMode && mFrameCount % 10 == 0) {
+  if (!mSvoMode && mCamSettingsDirty && mFrameCount % 10 == 0) {
     std::lock_guard<std::mutex> lock(mDynParMutex);
 
     applyAutoExposureGainSettings();
@@ -969,6 +978,8 @@ void ZedCamera::applyVideoSettings()
     applyBrightnessContrastHueSettings();
     applySaturationSharpnessGammaSettings();
     applyZEDXSettings();
+
+    mCamSettingsDirty = false;
   }
 }
 
@@ -2546,53 +2557,49 @@ void ZedCamera::publishPointCloud()
 {
   sl_tools::StopWatch pcElabTimer(get_clock());
 
-  auto pcMsg = std::make_unique<sensor_msgs::msg::PointCloud2>();
-
-  // Initialize Point Cloud message
-  // https://github.com/ros/common_msgs/blob/jade-devel/sensor_msgs/include/sensor_msgs/point_cloud2_iterator.h
-
   int width = mPcResol.width;
   int height = mPcResol.height;
 
   int ptsCount = width * height;
 
+  rclcpp::Time stamp;
   if (mSvoMode) {
-    pcMsg->header.stamp = mUsePubTimestamps ? get_clock()->now() : mFrameTimestamp;
+    stamp = mUsePubTimestamps ? get_clock()->now() : mFrameTimestamp;
   } else if (mSimMode) {
     if (mUseSimTime) {
-      pcMsg->header.stamp = mUsePubTimestamps ? get_clock()->now() : mFrameTimestamp;
+      stamp = mUsePubTimestamps ? get_clock()->now() : mFrameTimestamp;
     } else {
-      pcMsg->header.stamp = mUsePubTimestamps ? get_clock()->now() : sl_tools::slTime2Ros(
+      stamp = mUsePubTimestamps ? get_clock()->now() : sl_tools::slTime2Ros(
         mMatCloud.timestamp);
     }
   } else {
-    pcMsg->header.stamp = mUsePubTimestamps ? get_clock()->now() : sl_tools::slTime2Ros(
+    stamp = mUsePubTimestamps ? get_clock()->now() : sl_tools::slTime2Ros(
       mMatCloud.timestamp);
   }
 
-  // ---> Check that `pcMsg->header.stamp` is not the same of the latest
-  // published pointcloud Avoid to publish the same old data
-  if (mLastTs_pc == pcMsg->header.stamp) {
-    // Data not updated by a grab calling in the grab thread
+  // ---> Check that timestamp is not the same of the latest
+  // published pointcloud. Avoid publishing the same old data.
+  if (mLastTs_pc == stamp) {
     DEBUG_STREAM_PC(" * [publishPointCloud] ignoring not update data");
     return;
   }
-  mLastTs_pc = pcMsg->header.stamp;
-  // <--- Check that `pcMsg->header.stamp` is not the same of the latest
-  // published pointcloud
+  mLastTs_pc = stamp;
+  // <--- Check timestamp
 
-  if (pcMsg->width != width || pcMsg->height != height) {
-    pcMsg->header.frame_id =
-      mPointCloudFrameId;      // Set the header values of the ROS message
+  // Resize the reusable message buffer only when resolution changes
+  if (static_cast<int>(mPcMsg.width) != width ||
+    static_cast<int>(mPcMsg.height) != height)
+  {
+    mPcMsg.header.frame_id = mPointCloudFrameId;
 
     int val = 1;
-    pcMsg->is_bigendian = !(*reinterpret_cast<char *>(&val) == 1);
-    pcMsg->is_dense = false;
+    mPcMsg.is_bigendian = !(*reinterpret_cast<char *>(&val) == 1);
+    mPcMsg.is_dense = false;
 
-    pcMsg->width = width;
-    pcMsg->height = height;
+    mPcMsg.width = width;
+    mPcMsg.height = height;
 
-    sensor_msgs::PointCloud2Modifier modifier(*(pcMsg.get()));
+    sensor_msgs::PointCloud2Modifier modifier(mPcMsg);
     modifier.setPointCloud2Fields(
       4, "x", 1, sensor_msgs::msg::PointField::FLOAT32, "y", 1,
       sensor_msgs::msg::PointField::FLOAT32, "z", 1,
@@ -2600,10 +2607,12 @@ void ZedCamera::publishPointCloud()
       sensor_msgs::msg::PointField::FLOAT32);
   }
 
+  mPcMsg.header.stamp = stamp;
+
   sl::Vector4<float> * cpu_cloud = mMatCloud.getPtr<sl::float4>();
 
-  // Data copy
-  float * ptCloudPtr = reinterpret_cast<float *>(&pcMsg->data[0]);
+  // Data copy into reused buffer
+  float * ptCloudPtr = reinterpret_cast<float *>(&mPcMsg.data[0]);
   memcpy(
     ptCloudPtr, reinterpret_cast<float *>(cpu_cloud),
     ptsCount * 4 * sizeof(float));
@@ -2612,7 +2621,7 @@ void ZedCamera::publishPointCloud()
   DEBUG_PC(" * [publishPointCloud] Publishing POINT CLOUD message");
 #ifdef FOUND_POINT_CLOUD_TRANSPORT
   try {
-    mPubCloud.publish(std::move(pcMsg));
+    mPubCloud.publish(mPcMsg);
   } catch (std::system_error & e) {
     DEBUG_STREAM_PC(" * [publishPointCloud] Message publishing exception: " << e.what());
   } catch (...) {
@@ -2621,7 +2630,7 @@ void ZedCamera::publishPointCloud()
 #else
   try {
     if (mPubCloud) {
-      mPubCloud->publish(std::move(pcMsg));
+      mPubCloud->publish(mPcMsg);
     }
   } catch (std::system_error & e) {
     DEBUG_STREAM_PC(" * [publishPointCloud] Message publishing exception: " << e.what());
@@ -3078,7 +3087,8 @@ bool ZedCamera::handleGmsl2Params(
     } else if (name == "video.denoising") {
       mGmslDenoising = val;
     }
-    RCLCPP_INFO_STREAM(get_logger(), "Parameter '" << name << "' correctly set to " << val);
+    mCamSettingsDirty = true;
+    DEBUG_STREAM_DYN_PARAMS("Parameter '" << name << "' correctly set to " << val);
     return true;
   }
   return false;
@@ -3112,7 +3122,8 @@ bool ZedCamera::handleUsb3Params(
     } else if (name == "video.hue") {
       mCamHue = val;
     }
-    RCLCPP_INFO_STREAM(get_logger(), "Parameter '" << name << "' correctly set to " << val);
+    mCamSettingsDirty = true;
+    DEBUG_STREAM_DYN_PARAMS("Parameter '" << name << "' correctly set to " << val);
     return true;
   }
   return false;
@@ -3151,7 +3162,8 @@ bool ZedCamera::handleCommonVideoParams(
       mCamWBTemp = val * 100;
       mCamAutoWB = false;
     }
-    RCLCPP_INFO_STREAM(get_logger(), "Parameter '" << name << "' correctly set to " << val);
+    mCamSettingsDirty = true;
+    DEBUG_STREAM_DYN_PARAMS("Parameter '" << name << "' correctly set to " << val);
     return true;
   } else if (name == "video.auto_exposure_gain") {
     rclcpp::ParameterType correctType = rclcpp::ParameterType::PARAMETER_BOOL;
@@ -3166,7 +3178,8 @@ bool ZedCamera::handleCommonVideoParams(
       mTriggerAutoExpGain = true;
     }
     mCamAutoExpGain = val;
-    RCLCPP_INFO_STREAM(get_logger(), "Parameter '" << name << "' correctly set to " << val);
+    mCamSettingsDirty = true;
+    DEBUG_STREAM_DYN_PARAMS("Parameter '" << name << "' correctly set to " << val);
     return true;
   } else if (name == "video.auto_whitebalance") {
     rclcpp::ParameterType correctType = rclcpp::ParameterType::PARAMETER_BOOL;
@@ -3181,7 +3194,8 @@ bool ZedCamera::handleCommonVideoParams(
       mTriggerAutoWB = true;
     }
     mCamAutoWB = val;
-    RCLCPP_INFO_STREAM(get_logger(), "Parameter '" << name << "' correctly set to " << val);
+    mCamSettingsDirty = true;
+    DEBUG_STREAM_DYN_PARAMS("Parameter '" << name << "' correctly set to " << val);
     return true;
   } else if (name == "general.pub_frame_rate") {
     rclcpp::ParameterType correctType = rclcpp::ParameterType::PARAMETER_DOUBLE;
@@ -3192,14 +3206,17 @@ bool ZedCamera::handleCommonVideoParams(
       return true;
     }
     double val = param.as_double();
-    if ((val <= 0.0) || (val > mCamGrabFrameRate)) {
+    if (val < -1.0 || val > mCamGrabFrameRate) {
       result.successful = false;
-      result.reason = name + " must be positive and minor of `grab_frame_rate`";
+      result.reason = name + " must be >= -1 and <= `grab_frame_rate` (0 or -1 = no limit)";
       RCLCPP_WARN_STREAM(get_logger(), result.reason);
       return true;
     }
+    if (val <= 0.0) {
+      val = static_cast<double>(mCamGrabFrameRate);
+    }
     mVdPubRate = val;
-    RCLCPP_INFO_STREAM(get_logger(), "Parameter '" << name << "' correctly set to " << val);
+    DEBUG_STREAM_DYN_PARAMS("Parameter '" << name << "' correctly set to " << val);
     return true;
   }
   return false;
@@ -3220,14 +3237,17 @@ bool ZedCamera::handleDepthParams(
       return true;
     }
     double val = param.as_double();
-    if ((val <= 0.0) || (val > mCamGrabFrameRate)) {
+    if (val < -1.0 || val > mCamGrabFrameRate) {
       result.successful = false;
-      result.reason = name + " must be positive and minor of `grab_frame_rate`";
+      result.reason = name + " must be >= -1 and <= `grab_frame_rate` (0 or -1 = no limit)";
       RCLCPP_WARN_STREAM(get_logger(), result.reason);
       return true;
     }
+    if (val <= 0.0) {
+      val = static_cast<double>(mCamGrabFrameRate);
+    }
     mPcPubRate = val;
-    RCLCPP_INFO_STREAM(get_logger(), "Parameter '" << name << "' correctly set to " << val);
+    DEBUG_STREAM_DYN_PARAMS("Parameter '" << name << "' correctly set to " << val);
     return true;
   } else if (name == "depth.depth_confidence" || name == "depth.depth_texture_conf") {
     rclcpp::ParameterType correctType = rclcpp::ParameterType::PARAMETER_INTEGER;
@@ -3243,7 +3263,8 @@ bool ZedCamera::handleDepthParams(
     } else if (name == "depth.depth_texture_conf") {
       mDepthTextConf = val;
     }
-    RCLCPP_INFO_STREAM(get_logger(), "Parameter '" << name << "' correctly set to " << val);
+
+    DEBUG_STREAM_DYN_PARAMS("Parameter '" << name << "' correctly set to " << val);
     return true;
   } else if (name == "depth.remove_saturated_areas") {
     rclcpp::ParameterType correctType = rclcpp::ParameterType::PARAMETER_BOOL;
@@ -3254,9 +3275,11 @@ bool ZedCamera::handleDepthParams(
       return true;
     }
     mRemoveSatAreas = param.as_bool();
-    RCLCPP_INFO_STREAM(
-      get_logger(),
-      "Parameter '" << name << "' correctly set to " << (mRemoveSatAreas ? "TRUE" : "FALSE"));
+    DEBUG_STREAM_DYN_PARAMS(
+
+      "Parameter '"
+        << name << "' correctly set to "
+        << (mRemoveSatAreas ? "TRUE" : "FALSE"));
     return true;
   }
   return false;

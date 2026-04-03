@@ -246,6 +246,7 @@ private:
 
   // ----> Debug variables
   bool _debugCommon = false;
+  bool _debugDynParams = false;
   bool _debugVideoDepth = false;
   bool _debugSensors = false;
   bool _debugCamCtrl = false;
@@ -372,6 +373,9 @@ private:
   bool _publishSensTemp = false;
 
   std::string _svoFilepath = "";
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 53
+  std::string _svoDecryptionKey = "";
+#endif
   bool _svoLoop = false;
   bool _svoRealtime = false;
   int _svoFrameStart = 0;

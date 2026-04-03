@@ -1,7 +1,7 @@
 LATEST CHANGES
 ==============
 
-2026-03-03
+v5.2.2
 ----------
 - Default Positional Tracking mode changed back to `GEN_1` until the stability and reliability of `GEN_3` is improved. 
   Users can still select a specific mode by setting the `pos_tracking.pos_tracking_mode` parameter to `GEN_1`, `GEN_2`, or `GEN_3` according to their needs and preferences.
@@ -16,6 +16,10 @@ LATEST CHANGES
   - Depth stability follows the ZED SDK behaviors.
   - Object Tracking follows the ZED SDK behaviors.
   - Body Tracking follows the ZED SDK behaviors.
+
+- Add new parameter `debug.debug_dyn_params` to enable debug logs for dynamic parameters changes. 
+
+  - Dynamic parameters related logs are now displayed only if the new debug parameter `debug.debug_dyn_params` is set to `true` to avoid log spam when changing dynamic parameters.
 
 v5.2.1
 ------

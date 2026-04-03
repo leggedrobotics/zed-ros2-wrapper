@@ -12,6 +12,7 @@
             sim_port: 30000 # The connection port of the simulation server. See the documentation of the supported simulation plugins for more information.
 
         svo:
+            decryption_key: "" # Optional decryption key/passphrase when opening encrypted SVO files
             use_svo_timestamps: true # Use the SVO timestamps to publish data. If false, data will be published at the system time.
             publish_svo_clock: false # [overwritten by launch file options] When use_svo_timestamps is true allows to publish the SVO clock to the `/clock` topic. This is useful for synchronous rosbag playback.
             svo_loop: false # Enable loop mode when using an SVO as input source. NOTE: ignored if SVO timestamping is used
@@ -198,6 +199,7 @@
             sdk_verbose_log_file: '' # Path to the file where the ZED SDK will log its messages. If empty, no file will be created. The log level can be set using the `sdk_verbose` parameter.
             use_pub_timestamps: false # Use the current ROS time for the message timestamp instead of the camera timestamp. This is useful to test data communication latency.
             debug_common: false
+            debug_dyn_params: false
             debug_grab: false
             debug_sim: false
             debug_video_depth: false
