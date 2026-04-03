@@ -83,19 +83,11 @@
             publish_roi_mask: false # Advertise the ROI mask image topic that is published only if a node subscribes to it
 
         depth:
-<<<<<<< HEAD
             depth_mode: 'NEURAL' # Matches the ZED SDK setting: 'NONE', 'PERFORMANCE', 'QUALITY', 'ULTRA', 'NEURAL', 'NEURAL_PLUS' - Note: if 'NONE' all the modules that requires depth extraction are disabled by default (Pos. Tracking, Obj. Detection, Mapping, ...)
             depth_stabilization: 50 # Forces positional tracking to start if major than 0 - Range: [0,100]
             openni_depth_mode: false # 'false': 32bit float [meters], 'true': 16bit unsigned int [millimeters]
             point_cloud_freq: 10.0 # [DYNAMIC] Frequency of the pointcloud publishing. This value must be equal or less than the camera framerate.
             point_cloud_res: 'REDUCED' # The resolution used for point cloud publishing - 'COMPACT'-Standard resolution. Optimizes processing and bandwidth, 'REDUCED'-Half resolution. Low processing and bandwidth requirements
-=======
-            depth_mode: 'NEURAL_LIGHT' # Matches the ZED SDK setting: 'NONE', 'NEURAL_LIGHT', 'NEURAL', 'NEURAL_PLUS' - Note: if 'NONE' all the modules that requires depth extraction are disabled by default (Pos. Tracking, Obj. Detection, Mapping, ...)
-            depth_stabilization: -1 # Negative value takes SDK default, 0 is disabled - Range: [0,100]
-            openni_depth_mode: false # 'false': 32bit float [meters], 'true': 16bit unsigned int [millimeters]
-            point_cloud_freq: 10.0 # [DYNAMIC] Frequency of the pointcloud publishing. This value must be <= the camera framerate. Set to 0 for no limit (= grab_frame_rate).
-            point_cloud_res: 'COMPACT' # The resolution used for point cloud publishing - 'COMPACT'-Standard resolution. Optimizes processing and bandwidth, 'REDUCED'-Half resolution. Low processing and bandwidth requirements
->>>>>>> upstream/master
             depth_confidence: 95 # [DYNAMIC]
             depth_texture_conf: 100 # [DYNAMIC]
             remove_saturated_areas: true # [DYNAMIC]
@@ -109,11 +101,7 @@
 
         pos_tracking:
             pos_tracking_enabled: true # True to enable positional tracking from start
-<<<<<<< HEAD
             pos_tracking_mode: 'GEN_3' # Matches the ZED SDK setting: 'GEN_1', 'GEN_2', 'GEN_3'
-=======
-            pos_tracking_mode: 'AUTO' # 'AUTO' uses the SDK default; also supports 'GEN_1', 'GEN_3'
->>>>>>> upstream/master
             imu_fusion: true # enable/disable IMU fusion. When set to false, only the optical odometry will be used.
             publish_tf: true # [overwritten by launch file options] publish `odom -> camera_link` TF
             publish_map_tf: true # [overwritten by launch file options] publish `map -> odom` TF
@@ -131,13 +119,8 @@
             set_gravity_as_origin: true # If 'true' align the positional tracking world to imu gravity measurement. Keep the yaw from the user initial pose.
             floor_alignment: false # Enable to automatically calculate camera/floor offset
             initial_base_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] # Initial position of the `camera_link` frame in the map -> [X, Y, Z, R, P, Y]
-<<<<<<< HEAD
             path_pub_rate: 10.0 # [DYNAMIC] - Camera trajectory publishing frequency
             path_max_count: 500 # use '-1' for unlimited path size
-=======
-            path_pub_rate: 2.0 # [DYNAMIC] - Camera trajectory publishing frequency. Set to 0 for no limit (= grab_frame_rate).
-            path_max_count: -1 # use '-1' for unlimited path size
->>>>>>> upstream/master
             two_d_mode: false # Force navigation on a plane. If true the Z value will be fixed to 'fixed_z_value', roll and pitch to zero
             fixed_z_value: 0.0 # Value to be used for Z coordinate if `two_d_mode` is true
             transform_time_offset: 0.0 # The value added to the timestamp of `map->odom` and `odom->camera_link` transform being generated
@@ -164,13 +147,8 @@
         mapping:
             mapping_enabled: false # True to enable mapping t # and fused point cloud publication
             resolution: 0.05 # maps resolution in meters [min: 0.01f - max: 0.2f]
-<<<<<<< HEAD
-            max_mapping_range: 4.0 # maximum depth range while mapping in meters (-1 for automatic calculation) [2.0, 20.0]
-            fused_pointcloud_freq: 1.0 # frequency of the publishing of the fused colored point cloud
-=======
             max_mapping_range: 5.0 # maximum depth range while mapping in meters (-1 for automatic calculation) [2.0, 20.0]
             fused_pointcloud_freq: 1.0 # frequency of the publishing of the fused colored point cloud. Set to 0 for no limit (= point_cloud_freq).
->>>>>>> upstream/master
             clicked_point_topic: '/clicked_point' # Topic published by Rviz when a point of the cloud is clicked. Used for plane detection
             pd_max_distance_threshold: 0.15 # Plane detection: controls the spread of plane by checking the position difference.
             pd_normal_similarity_threshold: 15.0 # Plane detection: controls the spread of plane by checking the angle difference.

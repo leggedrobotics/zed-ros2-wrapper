@@ -501,12 +501,6 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
-            # RViz2 node
-            rviz_node,
-
-            # Static TF
-            static_tf_node,
-
             # RViz-related launch arguments
             DeclareLaunchArgument(
                 'rviz',
@@ -517,6 +511,12 @@ def generate_launch_description():
                 'rviz_config',
                 default_value=TextSubstitution(text=default_rviz_config_path),
                 description='Absolute path to the RViz2 configuration file.'),
+
+            # RViz2 node
+            rviz_node,
+
+            # Static TF
+            static_tf_node,
             # Declare launch arguments
             DeclareLaunchArgument(
                 'node_log_type',
