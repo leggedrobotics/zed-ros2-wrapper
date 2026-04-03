@@ -472,6 +472,7 @@ def generate_launch_description():
                 description='The name of the camera. It can be different from the camera model and it will be used as node `namespace`.'),
             DeclareLaunchArgument(
                 'camera_model',
+                default_value='zedx',
                 description='[REQUIRED] The model of the camera. Using a wrong camera model can disable camera features.',
                 choices=['zed', 'zedm', 'zed2', 'zed2i', 'zedx', 'zedxm', 'zedxhdr', 'zedxhdrmini', 'zedxhdrmax', 'virtual', 'zedxonegs', 'zedxone4k', 'zedxonehdr']),
             DeclareLaunchArgument(
@@ -531,7 +532,7 @@ def generate_launch_description():
                 choices=['true', 'false']),
             DeclareLaunchArgument(
                 'publish_imu_tf',
-                default_value='false',
+                default_value='true',
                 description='Enable publication of the IMU TF. Note: Ignored if `publish_tf` is False.',
                 choices=['true', 'false']),
             DeclareLaunchArgument(
