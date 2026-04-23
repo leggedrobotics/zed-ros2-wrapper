@@ -504,7 +504,7 @@ def generate_launch_description():
             # RViz-related launch arguments
             DeclareLaunchArgument(
                 'rviz',
-                default_value='true',
+                default_value='false',
                 description='If true, start RViz2 with the specified configuration.',
                 choices=['true', 'false']),
             DeclareLaunchArgument(
