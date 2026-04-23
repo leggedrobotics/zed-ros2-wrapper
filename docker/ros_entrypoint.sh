@@ -2,8 +2,8 @@
 set -e
 
 # setup ros2 environment
-source "/opt/ros/$ROS_DISTRO/setup.bash" --
-source "/root/ros2_ws/install/local_setup.bash" --
+source "/opt/ros/$ROS_DISTRO/setup.bash"
+source "/root/ros2_ws/install/local_setup.bash"
 
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-1}"
 
