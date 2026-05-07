@@ -72,8 +72,12 @@ install(DIRECTORY
 # Install LAUNCH files
 install(DIRECTORY
   launch
+  DESTINATION share/${PROJECT_NAME}
+)
+
+# Install RViz2 files
+install(DIRECTORY
   rviz2
-  urdf
   DESTINATION share/${PROJECT_NAME}
 )
 

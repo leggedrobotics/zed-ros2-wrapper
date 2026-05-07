@@ -274,7 +274,7 @@ void ZedCameraOne::initVideoPublishers()
     ImageTopicType type = ImageTopicType::IMAGE) {
       ipcPub = create_ipc_pub(topic);
       set_transport_plugins(topic, type);
-      itPub = image_transport::create_publisher(this, topic, qos);
+      itPub = createImageTransportPublisher(this, topic, qos, _pubOpt);
       log_cam_pub(itPub);
     };
 
@@ -332,7 +332,7 @@ void ZedCameraOne::initVideoPublishers()
   // Lambda to create and log CameraInfo publishers
   auto make_cam_info_pub = [&](const std::string & topic) {
       std::string info_topic = image_transport::getCameraInfoTopic(topic);
-      auto pub = create_publisher<sensor_msgs::msg::CameraInfo>(info_topic, _qos);
+      auto pub = create_publisher<sensor_msgs::msg::CameraInfo>(info_topic, _qos, _pubOpt);
       RCLCPP_INFO_STREAM(get_logger(), "  * Advertised on topic: " << pub->get_topic_name());
       return pub;
     };
@@ -340,7 +340,7 @@ void ZedCameraOne::initVideoPublishers()
   // Lambda to create and log CameraInfo publishers for image_transport or nitros
   auto make_cam_info_trans_pub = [&](const std::string & topic) {
       std::string info_topic = topic + "/camera_info";
-      auto pub = create_publisher<sensor_msgs::msg::CameraInfo>(info_topic, _qos);
+      auto pub = create_publisher<sensor_msgs::msg::CameraInfo>(info_topic, _qos, _pubOpt);
       RCLCPP_INFO_STREAM(
         get_logger(),
         "  * Advertised on topic: " << pub->get_topic_name());

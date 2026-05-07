@@ -62,12 +62,12 @@ default_custom_object_detection_config_path = os.path.join(
 
 # URDF/xacro file to be loaded by the Robot State Publisher node
 default_xacro_path = os.path.join(
-    get_package_share_directory('zed_wrapper'),
+    get_package_share_directory('zed_description'),
     'urdf',
     'zed_descr.urdf.xacro'
 )
 
-# RViz configuration file
+# RViz2 configuration file to be loaded at startup
 default_rviz_config_path = os.path.join(
     get_package_share_directory('zed_wrapper'),
     'rviz2',
@@ -200,6 +200,8 @@ def launch_setup(context, *args, **kwargs):
     publish_map_tf = LaunchConfiguration('publish_map_tf')
     publish_imu_tf = LaunchConfiguration('publish_imu_tf')
     xacro_path = LaunchConfiguration('xacro_path')
+    launch_rviz = LaunchConfiguration('launch_rviz')
+    rviz_config_path = LaunchConfiguration('rviz_config_path')
 
     enable_gnss = LaunchConfiguration('enable_gnss')
     gnss_antenna_offset = LaunchConfiguration('gnss_antenna_offset')
@@ -364,6 +366,11 @@ def launch_setup(context, *args, **kwargs):
 
     # Robot State Publisher node
     rsp_name = camera_name_val + '_state_publisher'
+    rsp_additional_env = {}
+    rsp_cyclonedds_uri = os.environ.get('ZED_RSP_CYCLONEDDS_URI', '')
+    if rsp_cyclonedds_uri != '':
+        rsp_additional_env['CYCLONEDDS_URI'] = rsp_cyclonedds_uri
+
     rsp_node = Node(
         condition=IfCondition(publish_urdf),
         package='robot_state_publisher',
@@ -375,7 +382,8 @@ def launch_setup(context, *args, **kwargs):
             'use_sim_time': publish_svo_clock,
             'robot_description': Command(xacro_command)
         }],
-        remappings=[('robot_description', camera_name_val+'_description')]
+        remappings=[('robot_description', camera_name_val+'_description')],
+        additional_env=rsp_additional_env
     )
     return_array.append(rsp_node)
 
@@ -473,61 +481,30 @@ def launch_setup(context, *args, **kwargs):
     )
     return_array.append(load_composable_node)
 
-    return return_array
-
-def generate_launch_description():
-
-    # RViz configuration
-    rviz = LaunchConfiguration('rviz')
-    rviz_config = LaunchConfiguration('rviz_config')
+    rviz_config_path_val = rviz_config_path.perform(context)
+    info = 'Using RViz2 configuration file: ' + rviz_config_path_val
+    return_array.append(LogInfo(
+        condition=IfCondition(launch_rviz),
+        msg=TextSubstitution(text=info)))
 
     rviz_node = Node(
-        condition=IfCondition(rviz),
+        condition=IfCondition(launch_rviz),
         package='rviz2',
         executable='rviz2',
         name='rviz2',
-        arguments=['-d', rviz_config],
-        output='screen'
+        output='screen',
+        arguments=['-d', rviz_config_path_val],
+        parameters=[{
+            'use_sim_time': use_sim_time
+        }]
     )
+    return_array.append(rviz_node)
 
-    # ----------------------------------------------------------------------------
-    # Static tf publisher (always launched to publish base → zed_camera_link)
-    # ----------------------------------------------------------------------------
-    # static_tf_node = Node(
-    #     package="tf2_ros",
-    #     executable="static_transform_publisher",
-    #     output="screen",
-    #     arguments=[
-    #         "0.403797286625",
-    #         "0.000069481019",
-    #         "0.299614625933",
-    #         "0.000000",
-    #         "0.173616",
-    #         "0.000000",
-    #         "0.984813",
-    #         "base",
-    #         "zed_camera_link",
-    #     ],
-    # )
+    return return_array
 
+def generate_launch_description():
     return LaunchDescription(
         [
-            # RViz-related launch arguments
-            DeclareLaunchArgument(
-                'rviz',
-                default_value='false',
-                description='If true, start RViz2 with the specified configuration.',
-                choices=['true', 'false']),
-            DeclareLaunchArgument(
-                'rviz_config',
-                default_value=TextSubstitution(text=default_rviz_config_path),
-                description='Absolute path to the RViz2 configuration file.'),
-
-            # RViz2 node
-            rviz_node,
-
-            # Static TF
-            static_tf_node,
             # Declare launch arguments
             DeclareLaunchArgument(
                 'node_log_type',
@@ -541,6 +518,7 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 'camera_model',
                 description='[REQUIRED] The model of the camera. Using a wrong camera model can disable camera features.',
+                default_value='zedx',
                 choices=['zed', 'zedm', 'zed2', 'zed2i', 'zedx', 'zedxm', 'zedxhdr', 'zedxhdrmini', 'zedxhdrmax', 'virtual', 'zedxonegs', 'zedxone4k', 'zedxonehdr']),
             DeclareLaunchArgument(
                 'container_name',
@@ -606,6 +584,15 @@ def generate_launch_description():
                 'xacro_path',
                 default_value=TextSubstitution(text=default_xacro_path),
                 description='Path to the camera URDF file as a xacro file.'),
+            DeclareLaunchArgument(
+                'launch_rviz',
+                default_value='true',
+                description='Open RViz2 at startup with the configured RViz layout.',
+                choices=['true', 'false']),
+            DeclareLaunchArgument(
+                'rviz_config_path',
+                default_value=TextSubstitution(text=default_rviz_config_path),
+                description='Path to the RViz2 configuration file.'),
             DeclareLaunchArgument(
                 'svo_path',
                 default_value=TextSubstitution(text='live'),

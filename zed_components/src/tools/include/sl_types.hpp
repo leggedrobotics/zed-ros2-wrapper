@@ -49,6 +49,8 @@
 #include <std_msgs/msg/bool.hpp>
 #include <std_srvs/srv/set_bool.hpp>
 #include <std_srvs/srv/trigger.hpp>
+#include <type_traits>
+#include <utility>
 #include <zed_msgs/srv/set_svo_frame.hpp>
 #include <stereo_msgs/msg/disparity_image.hpp>
 #include <string>
@@ -180,6 +182,37 @@ typedef rclcpp::Service<robot_localization::srv::ToLL>::SharedPtr toLLSrvPtr;
 typedef rclcpp::Service<robot_localization::srv::FromLL>::SharedPtr fromLLSrvPtr;
 typedef rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr enableStreamingPtr;
 
+namespace detail
+{
+
+template<typename NodeT, typename = void>
+struct ImageTransportSupportsPublisherOptions : std::false_type {};
+
+template<typename NodeT>
+struct ImageTransportSupportsPublisherOptions<
+  NodeT,
+  std::void_t<decltype(image_transport::create_publisher(
+      std::declval<NodeT *>(),
+      std::declval<const std::string &>(),
+      std::declval<rmw_qos_profile_t>(),
+      std::declval<const rclcpp::PublisherOptions &>()))>> : std::true_type {};
+
+}  // namespace detail
+
+template<typename NodeT>
+image_transport::Publisher createImageTransportPublisher(
+  NodeT * node,
+  const std::string & base_topic,
+  rmw_qos_profile_t qos,
+  const rclcpp::PublisherOptions & options)
+{
+  if constexpr (detail::ImageTransportSupportsPublisherOptions<NodeT>::value) {
+    return image_transport::create_publisher(node, base_topic, qos, options);
+  } else {
+    (void)options;
+    return image_transport::create_publisher(node, base_topic, qos);
+  }
+}
 
 /*!
  * @brief Video/Depth topic resolution
