@@ -138,8 +138,10 @@ RUN wget https://github.com/ros/xacro/archive/refs/tags/${XACRO_VERSION}.tar.gz 
     cp -r geographic-info/geographic_msgs/ . && \
     rm -rf geographic-info
     
-# Install cython
-RUN python3 -m pip install --upgrade cython
+# Cython is present in the Jetson ROS base image. Avoid an unnecessary online
+# upgrade here because the base image's default pip index may be unreachable.
+RUN python3 -c "import Cython; print(f'Cython {Cython.__version__} already installed')" || \
+  python3 -m pip install --no-cache-dir --index-url https://pypi.org/simple cython
 
 # Build the dependencies and the ZED ROS2 Wrapper
 WORKDIR /root/ros2_ws
