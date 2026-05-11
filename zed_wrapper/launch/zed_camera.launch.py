@@ -387,6 +387,24 @@ def launch_setup(context, *args, **kwargs):
     )
     return_array.append(rsp_node)
 
+    static_tf_node = Node(
+        package="tf2_ros",
+        executable="static_transform_publisher",
+        output="screen",
+        arguments=[
+            "0.0",
+            "0.0",
+            "0.0",
+            "0.000000",
+            "0.000000",
+            "0.000000",
+            "1.000000",
+            "zed_base_link",
+            "zed_camera_link",
+        ],
+    )
+    return_array.append(static_tf_node)
+
     # ROS 2 Component Container
     if(container_name_val == ''):
         container_name_val='zed_container'
