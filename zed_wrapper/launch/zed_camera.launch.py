@@ -370,6 +370,10 @@ def launch_setup(context, *args, **kwargs):
     rsp_cyclonedds_uri = os.environ.get('ZED_RSP_CYCLONEDDS_URI', '')
     if rsp_cyclonedds_uri != '':
         rsp_additional_env['CYCLONEDDS_URI'] = rsp_cyclonedds_uri
+    static_tf_additional_env = {}
+    static_tf_cyclonedds_uri = os.environ.get('ZED_STATIC_TF_CYCLONEDDS_URI', rsp_cyclonedds_uri)
+    if static_tf_cyclonedds_uri != '':
+        static_tf_additional_env['CYCLONEDDS_URI'] = static_tf_cyclonedds_uri
 
     rsp_node = Node(
         condition=IfCondition(publish_urdf),
@@ -402,6 +406,7 @@ def launch_setup(context, *args, **kwargs):
             "zed_base_link",
             "zed_camera_link",
         ],
+        additional_env=static_tf_additional_env,
     )
     return_array.append(static_tf_node)
 
