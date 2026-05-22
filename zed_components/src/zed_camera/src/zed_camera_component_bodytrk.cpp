@@ -235,6 +235,19 @@ void ZedCamera::stopBodyTracking()
     mBodyTrkEnabled = false;
     mZed->disableBodyTracking();
 
+    size_t bt_sub_count = 0;
+    try {
+      if (mPubBodyTrk) {bt_sub_count = count_subscribers(mPubBodyTrk->get_topic_name());}
+    } catch (...) {
+      rcutils_reset_error();
+      DEBUG_STREAM_OD("stopBodyTracking: Exception while counting subscribers");
+      return;
+    }
+
+    if (bt_sub_count < 1) {
+      return;
+    }
+
     // ----> Send an empty message to indicate that no more objects are tracked
     // (e.g clean RVIZ2)
     auto objMsg = std::make_unique<zed_msgs::msg::ObjectsStamped>();
