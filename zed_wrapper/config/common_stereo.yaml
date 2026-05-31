@@ -28,7 +28,7 @@
             serial_number: 0 # overwritten by launch file
             pub_resolution: 'CUSTOM' # The resolution used for image and depth map publishing. 'NATIVE' to use the same `general.grab_resolution` - `CUSTOM` to apply the `general.pub_downscale_factor` downscale factory to reduce bandwidth in transmission
             pub_downscale_factor: 5.0 # rescale factor used to rescale image before publishing when 'pub_resolution' is 'CUSTOM'
-            grab_compute_capping_fps: 0.0 # Define a computation upper limit to the grab frequency. This can be useful to get a known constant fixed rate or limit the computation load while keeping a short exposure time by setting a high camera capture framerate. If set to 0, the grab compute capping will be disabled and the ZED SDK will process data at the grab rate.
+            grab_compute_capping_fps: 10.0 # Define a computation upper limit to the grab frequency. This can be useful to get a known constant fixed rate or limit the computation load while keeping a short exposure time by setting a high camera capture framerate. If set to 0, the grab compute capping will be disabled and the ZED SDK will process data at the grab rate.
             pub_frame_rate: 0.0 # [DYNAMIC] Frequency of publishing of visual images and depth data (not the Point Cloud, see 'depth.point_cloud_freq'). This value must be <= the camera framerate. Set to 0 for no limit (= grab_frame_rate).
             enable_image_validity_check: 1 # [SDK5 required] Sets the image validity check. If set to 1, the SDK will check if the frames are valid before processing.
             gpu_id: -1
@@ -59,8 +59,8 @@
         sensors:
             publish_imu_tf: true # [overwritten by launch file options] enable/disable the IMU TF broadcasting
             sensors_image_sync: false # Synchronize Sensors messages with latest published video/depth message
-            sensors_pub_rate: 200. # frequency of publishing of sensors data. MAX: 400. - MIN: grab rate
-            publish_imu: true # Advertise the IMU topic that is published only if a node subscribes to it
+            sensors_pub_rate: 50. # frequency of publishing of sensors data. MAX: 400. - MIN: grab rate
+            publish_imu: false # Advertise the IMU topic that is published only if a node subscribes to it
             publish_imu_raw: false # Advertise the raw IMU topic that is published only if a node subscribes to it
             publish_cam_imu_transf: true # Advertise the CAMERA-IMU transformation topic that is published only if a node subscribes to it
             publish_mag: false # Advertise the magnetometer topic that is published only if a node subscribes to it
@@ -160,8 +160,8 @@
 
         object_detection:
             od_enabled: false # True to enable Object Detection
-            enable_tracking: true # Whether the object detection system includes object tracking capabilities across a sequence of images.
-            detection_model: 'PERSON_HEAD_BOX_ACCURATE' # 'MULTI_CLASS_BOX_FAST', 'MULTI_CLASS_BOX_MEDIUM', 'MULTI_CLASS_BOX_ACCURATE', 'PERSON_HEAD_BOX_FAST', 'PERSON_HEAD_BOX_ACCURATE', 'CUSTOM_YOLOLIKE_BOX_OBJECTS'
+            enable_tracking: false # Whether the object detection system includes object tracking capabilities across a sequence of images.
+            detection_model: 'PERSON_HEAD_BOX_FAST' # 'MULTI_CLASS_BOX_FAST', 'MULTI_CLASS_BOX_MEDIUM', 'MULTI_CLASS_BOX_ACCURATE', 'PERSON_HEAD_BOX_FAST', 'PERSON_HEAD_BOX_ACCURATE', 'CUSTOM_YOLOLIKE_BOX_OBJECTS'
             max_range: 15.0 # [m] Upper depth range for detections. The value cannot be greater than 'depth.max_depth'
             filtering_mode: 'NMS3D' # Filtering mode that should be applied to raw detections: 'NONE', 'NMS3D', 'NMS3D_PER_CLASS'
             prediction_timeout: 1.0 # During this time [sec], the object will have OK state even if it is not detected. Set this parameter to 0 to disable SDK predictions
@@ -172,7 +172,7 @@
             bt_enabled: true # True to enable Body Tracking
             model: 'HUMAN_BODY_ACCURATE' # 'HUMAN_BODY_FAST', 'HUMAN_BODY_MEDIUM', 'HUMAN_BODY_ACCURATE'
             body_format: 'BODY_18' # 'BODY_18','BODY_34','BODY_38'
-            allow_reduced_precision_inference: false # Allow inference to run at a lower precision to improve runtime and memory usage
+            allow_reduced_precision_inference: true # Allow inference to run at a lower precision to improve runtime and memory usage
             max_range: 15.0 # [m] Defines a upper depth range for detections
             body_kp_selection: 'FULL' # 'FULL', 'UPPER_BODY'
             enable_body_fitting: false # Defines if the body fitting will be applied

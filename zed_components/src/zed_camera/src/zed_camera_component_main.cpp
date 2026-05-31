@@ -63,8 +63,28 @@ using namespace std::placeholders;
 namespace stereolabs
 {
 
+namespace
+{
+
+rclcpp::NodeOptions getZedNodeOptions(const rclcpp::NodeOptions & options)
+{
+  auto zed_options = options;
+  const char * disable_parameter_events = std::getenv("ZED_DISABLE_PARAMETER_EVENTS");
+
+  if (disable_parameter_events != nullptr &&
+    disable_parameter_events[0] == '1' &&
+    disable_parameter_events[1] == '\0')
+  {
+    zed_options.start_parameter_event_publisher(false);
+  }
+
+  return zed_options;
+}
+
+}  // namespace
+
 ZedCamera::ZedCamera(const rclcpp::NodeOptions & options)
-: Node("zed_node", options),
+: Node("zed_node", getZedNodeOptions(options)),
   mDepthDisabled(false),                   // 530
   mStreamingServerRequired(false),         // 647
   mQos(QOS_QUEUE_SIZE),                    // 693

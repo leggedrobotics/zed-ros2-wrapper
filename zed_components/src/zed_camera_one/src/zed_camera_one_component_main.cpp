@@ -20,14 +20,36 @@
 
 #include <diagnostic_msgs/msg/diagnostic_status.hpp>
 
+#include <cstdlib>
+
 using namespace std::chrono_literals;
 using namespace std::placeholders;
 
 namespace stereolabs
 {
 
+namespace
+{
+
+rclcpp::NodeOptions getZedNodeOptions(const rclcpp::NodeOptions & options)
+{
+  auto zed_options = options;
+  const char * disable_parameter_events = std::getenv("ZED_DISABLE_PARAMETER_EVENTS");
+
+  if (disable_parameter_events != nullptr &&
+    disable_parameter_events[0] == '1' &&
+    disable_parameter_events[1] == '\0')
+  {
+    zed_options.start_parameter_event_publisher(false);
+  }
+
+  return zed_options;
+}
+
+}  // namespace
+
 ZedCameraOne::ZedCameraOne(const rclcpp::NodeOptions & options)
-: Node("zed_node_one", options),
+: Node("zed_node_one", getZedNodeOptions(options)),
   _threadStop(false),
   _qos(QOS_QUEUE_SIZE),
   _diagUpdater(this),
