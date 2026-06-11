@@ -119,12 +119,21 @@ def _to_bool(value):
 
     if isinstance(value, str):
         lowered = value.strip().lower()
-        if lowered == 'true':
+        if lowered in ('true', '1', 'yes', 'on'):
             return True
-        if lowered == 'false':
+        if lowered in ('false', '0', 'no', 'off'):
             return False
 
     return None
+
+
+def _private_parameter_events_topic(namespace_val, node_name_val):
+    parts = [
+        namespace_val.strip('/'),
+        node_name_val.strip('/'),
+        'parameter_events',
+    ]
+    return '/' + '/'.join(part for part in parts if part)
 
 
 def _find_disable_nitros(node):
@@ -216,6 +225,14 @@ def launch_setup(context, *args, **kwargs):
     gnss_coords = parse_array_param(gnss_antenna_offset.perform(context))
     serial_numbers_val = serial_numbers.perform(context)
     camera_ids_val = camera_ids.perform(context)
+    zed_remappings = []
+
+    if _to_bool(os.environ.get('ZED_DISABLE_PARAMETER_EVENTS', 'false')) is True:
+        parameter_events_target = _private_parameter_events_topic(namespace_val, node_name_val)
+        zed_remappings.append(('/parameter_events', parameter_events_target))
+        return_array.append(LogInfo(
+            msg=TextSubstitution(
+                text='Remapping ZED /parameter_events to ' + parameter_events_target)))
 
     stereo_models = (
         'zed', 'zedm', 'zed2', 'zed2i',
@@ -482,6 +499,7 @@ def launch_setup(context, *args, **kwargs):
             plugin='stereolabs::ZedCamera',
             name=node_name_val,
             parameters=node_parameters,
+            remappings=zed_remappings,
             extra_arguments=[{'use_intra_process_comms': enable_ipc_effective}]
         )
     else: # camera_model_val == 'zedxonegs' or camera_model_val == 'zedxone4k' or camera_model_val == 'zedxonehdr'
@@ -491,6 +509,7 @@ def launch_setup(context, *args, **kwargs):
             plugin='stereolabs::ZedCameraOne',
             name=node_name_val,
             parameters=node_parameters,
+            remappings=zed_remappings,
             extra_arguments=[{'use_intra_process_comms': enable_ipc_effective}]
         )
     
