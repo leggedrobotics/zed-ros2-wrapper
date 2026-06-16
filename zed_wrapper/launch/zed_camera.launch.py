@@ -68,6 +68,8 @@ default_xacro_path = os.path.join(
 )
 
 # Function to parse array-like launch arguments
+
+
 def parse_array_param(param):
     cleaned = param.replace('[', '').replace(']', '').replace(' ', '')
     if not cleaned:
@@ -151,6 +153,7 @@ def _get_disable_nitros_from_file(file_path):
     except Exception:
         return None
 
+
 def launch_setup(context, *args, **kwargs):
     return_array = []
 
@@ -161,7 +164,8 @@ def launch_setup(context, *args, **kwargs):
     publish_svo_clock = LaunchConfiguration('publish_svo_clock')
 
     enable_ipc = LaunchConfiguration('enable_ipc')
-    ipc_nitros_conflict_policy = LaunchConfiguration('ipc_nitros_conflict_policy')
+    ipc_nitros_conflict_policy = LaunchConfiguration(
+        'ipc_nitros_conflict_policy')
     use_sim_time = LaunchConfiguration('use_sim_time')
     sim_mode = LaunchConfiguration('sim_mode')
     sim_address = LaunchConfiguration('sim_address')
@@ -178,8 +182,10 @@ def launch_setup(context, *args, **kwargs):
     node_name = LaunchConfiguration('node_name')
 
     ros_params_override_path = LaunchConfiguration('ros_params_override_path')
-    object_detection_config_path = LaunchConfiguration('object_detection_config_path')
-    custom_object_detection_config_path = LaunchConfiguration('custom_object_detection_config_path')
+    object_detection_config_path = LaunchConfiguration(
+        'object_detection_config_path')
+    custom_object_detection_config_path = LaunchConfiguration(
+        'custom_object_detection_config_path')
     param_overrides = LaunchConfiguration('param_overrides')
 
     serial_number = LaunchConfiguration('serial_number')
@@ -210,19 +216,19 @@ def launch_setup(context, *args, **kwargs):
 
     stereo_models = (
         'zed', 'zedm', 'zed2', 'zed2i',
-        'zedx', 'zedxm',
+        'zedx', 'zedxm', 'zedxnano',
         'zedxhdr', 'zedxhdrmini', 'zedxhdrmax',
         'virtual'
     )
     is_stereo_model = camera_model_val in stereo_models
 
-    if(node_log_type_val == 'both'):
+    if (node_log_type_val == 'both'):
         node_log_effective = 'both'
     else:  # 'screen' or 'log'
         node_log_effective = {
             'stdout': node_log_type_val,
             'stderr': node_log_type_val
-            }
+        }
 
     if (camera_name_val == ''):
         camera_name_val = 'zed'
@@ -233,17 +239,17 @@ def launch_setup(context, *args, **kwargs):
         ids = parse_array_param(camera_ids_val)
 
         # If not in live mode, at least one of serials or ids must be a valid 2-values array
-        if(len(serials) != 2 and len(ids) != 2 and svo_path.perform(context) == 'live'):
+        if (len(serials) != 2 and len(ids) != 2 and svo_path.perform(context) == 'live'):
             return [
                 LogInfo(msg=TextSubstitution(
                     text='With a Virtual Stereo Camera setup, one of `serial_numbers` or `camera_ids` launch arguments must contain two valid values (Left and Right camera identification).'))
             ]
-    
-    if(namespace_val == ''):
+
+    if (namespace_val == ''):
         namespace_val = camera_name_val
     else:
         node_name_val = camera_name_val
-    
+
     # Common configuration file
     if is_stereo_model:
         config_common_path_val = default_config_common + '_stereo.yaml'
@@ -264,21 +270,24 @@ def launch_setup(context, *args, **kwargs):
     return_array.append(LogInfo(msg=TextSubstitution(text=info)))
 
     # Object Detection configuration file
-    info = 'Using Object Detection configuration file: ' + object_detection_config_path.perform(context)
+    info = 'Using Object Detection configuration file: ' +\
+        object_detection_config_path.perform(context)
     return_array.append(LogInfo(msg=TextSubstitution(text=info)))
-    
+
     # Custom Object Detection configuration file
-    info = 'Using Custom Object Detection configuration file: ' + custom_object_detection_config_path.perform(context)
+    info = 'Using Custom Object Detection configuration file: ' +\
+        custom_object_detection_config_path.perform(context)
     return_array.append(LogInfo(msg=TextSubstitution(text=info)))
 
     # ROS parameters override file
     ros_params_override_path_val = ros_params_override_path.perform(context)
-    if(ros_params_override_path_val != ''):
+    if (ros_params_override_path_val != ''):
         info = 'Using ROS parameters override file: ' + ros_params_override_path_val
         return_array.append(LogInfo(msg=TextSubstitution(text=info)))
 
     enable_ipc_effective = enable_ipc.perform(context) == 'true'
-    ipc_nitros_conflict_policy_val = ipc_nitros_conflict_policy.perform(context)
+    ipc_nitros_conflict_policy_val = ipc_nitros_conflict_policy.perform(
+        context)
 
     # Effective `debug.disable_nitros` value from loaded YAML files.
     # Component defaults differ if parameter is not present.
@@ -286,36 +295,52 @@ def launch_setup(context, *args, **kwargs):
     # - ZedCameraOne (mono): default false
     nitros_disabled_effective = True if is_stereo_model else False
 
-    common_disable_nitros = _get_disable_nitros_from_file(config_common_path_val)
+    common_disable_nitros = _get_disable_nitros_from_file(
+        config_common_path_val)
     if common_disable_nitros is not None:
         nitros_disabled_effective = common_disable_nitros
 
     if ros_params_override_path_val != '':
-        override_disable_nitros = _get_disable_nitros_from_file(ros_params_override_path_val)
+        override_disable_nitros = _get_disable_nitros_from_file(
+            ros_params_override_path_val)
         if override_disable_nitros is not None:
             nitros_disabled_effective = override_disable_nitros
 
     # Parse inline parameter overrides from command line
-    param_overrides_dict = _parse_param_overrides(param_overrides.perform(context))
+    param_overrides_dict = _parse_param_overrides(
+        param_overrides.perform(context))
 
     # Check if disable_nitros is set via inline overrides
-    inline_disable_nitros = _to_bool(param_overrides_dict.get('debug.disable_nitros'))
+    inline_disable_nitros = _to_bool(
+        param_overrides_dict.get('debug.disable_nitros'))
     if inline_disable_nitros is not None:
         nitros_disabled_effective = inline_disable_nitros
 
     if enable_ipc_effective and not nitros_disabled_effective:
-        conflict_msg = (
-            'Invalid configuration: `enable_ipc:=true` with '
-            '`debug.disable_nitros:=false` can cause NITROS startup failure '
-            '(volatile durability conflict).'
-        )
+        # Only enforce the conflict if NITROS is actually installed
+        try:
+            get_package_share_directory('isaac_ros_nitros')
+            nitros_installed = True
+        except Exception:
+            nitros_installed = False
 
-        if ipc_nitros_conflict_policy_val == 'disable_ipc':
-            enable_ipc_effective = False
-            return_array.append(LogInfo(msg=TextSubstitution(
-                text='WARNING: ' + conflict_msg + ' Forcing `enable_ipc:=false` for this launch.')))
+        if nitros_installed:
+            conflict_msg = (
+                'Invalid configuration: `enable_ipc:=true` with '
+                '`debug.disable_nitros:=false` can cause NITROS startup failure '
+                '(volatile durability conflict).'
+            )
+
+            if ipc_nitros_conflict_policy_val == 'disable_ipc':
+                enable_ipc_effective = False
+                return_array.append(LogInfo(msg=TextSubstitution(
+                    text='WARNING: ' + conflict_msg + ' Forcing `enable_ipc:=false` for this launch.')))
+            else:
+                raise RuntimeError(
+                    conflict_msg + ' Set `enable_ipc:=false` or `debug.disable_nitros:=true`.')
         else:
-            raise RuntimeError(conflict_msg + ' Set `enable_ipc:=false` or `debug.disable_nitros:=true`.')
+            return_array.append(LogInfo(msg=TextSubstitution(
+                text='NITROS not installed, skipping IPC/NITROS conflict check.')))
 
     # Xacro command with options
     xacro_command = []
@@ -329,11 +354,11 @@ def launch_setup(context, *args, **kwargs):
     xacro_command.append('camera_model:=')
     xacro_command.append(camera_model_val)
     xacro_command.append(' ')
-    if(enable_gnss_val=='true'):
+    if (enable_gnss_val == 'true'):
         xacro_command.append(' ')
         xacro_command.append('enable_gnss:=true')
         xacro_command.append(' ')
-        if(len(gnss_coords)==3):
+        if (len(gnss_coords) == 3):
             xacro_command.append('gnss_x:=')
             xacro_command.append(gnss_coords[0])
             xacro_command.append(' ')
@@ -362,63 +387,64 @@ def launch_setup(context, *args, **kwargs):
     return_array.append(rsp_node)
 
     # ROS 2 Component Container
-    if(container_name_val == ''):
-        container_name_val='zed_container'
+    if (container_name_val == ''):
+        container_name_val = 'zed_container'
         distro = os.environ['ROS_DISTRO']
         if distro == 'foxy':
             # Foxy does not support the isolated mode
-            container_exec='component_container'
-            arguments_val=['--ros-args', '--log-level', 'info']
+            container_exec = 'component_container'
+            arguments_val = ['--ros-args', '--log-level', 'info']
         else:
-            container_exec='component_container_isolated'
-            arguments_val=['--use_multi_threaded_executor','--ros-args', '--log-level', 'info']
-            #arguments_val=['--use_multi_threaded_executor','--ros-args', '--log-level', 'debug']
-        
+            container_exec = 'component_container_isolated'
+            arguments_val = ['--use_multi_threaded_executor',
+                             '--ros-args', '--log-level', 'info']
+            # arguments_val=['--use_multi_threaded_executor','--ros-args', '--log-level', 'debug']
+
         zed_container = ComposableNodeContainer(
-                name=container_name_val,
-                namespace=namespace_val,
-                package='rclcpp_components',
-                executable=container_exec,
-                arguments=arguments_val,
-                output=node_log_effective,
-                composable_node_descriptions=[]
+            name=container_name_val,
+            namespace=namespace_val,
+            package='rclcpp_components',
+            executable=container_exec,
+            arguments=arguments_val,
+            output=node_log_effective,
+            composable_node_descriptions=[]
         )
         return_array.append(zed_container)
 
     # ZED Node parameters
     node_parameters = [
-            # YAML files
-            config_common_path_val,  # Common parameters
-            config_camera_path,  # Camera related parameters
-            object_detection_config_path, # Object detection parameters
-            custom_object_detection_config_path # Custom object detection parameters
+        # YAML files
+        config_common_path_val,  # Common parameters
+        config_camera_path,  # Camera related parameters
+        object_detection_config_path,  # Object detection parameters
+        custom_object_detection_config_path  # Custom object detection parameters
     ]
 
-    if( ros_params_override_path_val != ''):
+    if (ros_params_override_path_val != ''):
         node_parameters.append(ros_params_override_path)
 
-    node_parameters.append( 
-            # Launch arguments must override the YAML files values
-            {
-                'use_sim_time': use_sim_time,
-                'simulation.sim_enabled': sim_mode,
-                'simulation.sim_address': sim_address,
-                'simulation.sim_port': sim_port,
-                'stream.stream_address': stream_address,
-                'stream.stream_port': stream_port,
-                'general.camera_name': camera_name_val,
-                'general.camera_model': camera_model_val,
-                'svo.svo_path': svo_path,
-                'svo.publish_svo_clock': publish_svo_clock,
-                'general.serial_number': serial_number,
-                'general.camera_id': camera_id,
-                'pos_tracking.publish_tf': publish_tf,
-                'pos_tracking.publish_map_tf': publish_map_tf,
-                'sensors.publish_imu_tf': publish_imu_tf,
-                'gnss_fusion.gnss_fusion_enabled': enable_gnss,
-                'general.virtual_serial_numbers': serial_numbers_val,
-                'general.virtual_camera_ids': camera_ids_val
-            }
+    node_parameters.append(
+        # Launch arguments must override the YAML files values
+        {
+            'use_sim_time': use_sim_time,
+            'simulation.sim_enabled': sim_mode,
+            'simulation.sim_address': sim_address,
+            'simulation.sim_port': sim_port,
+            'stream.stream_address': stream_address,
+            'stream.stream_port': stream_port,
+            'general.camera_name': camera_name_val,
+            'general.camera_model': camera_model_val,
+            'svo.svo_path': svo_path,
+            'svo.publish_svo_clock': publish_svo_clock,
+            'general.serial_number': serial_number,
+            'general.camera_id': camera_id,
+            'pos_tracking.publish_tf': publish_tf,
+            'pos_tracking.publish_map_tf': publish_map_tf,
+            'sensors.publish_imu_tf': publish_imu_tf,
+            'gnss_fusion.gnss_fusion_enabled': enable_gnss,
+            'general.virtual_serial_numbers': serial_numbers_val,
+            'general.virtual_camera_ids': camera_ids_val
+        }
     )
 
     # Append inline parameter overrides (highest priority)
@@ -435,7 +461,7 @@ def launch_setup(context, *args, **kwargs):
             parameters=node_parameters,
             extra_arguments=[{'use_intra_process_comms': enable_ipc_effective}]
         )
-    else: # camera_model_val == 'zedxonegs' or camera_model_val == 'zedxone4k' or camera_model_val == 'zedxonehdr'
+    else:  # camera_model_val == 'zedxonegs' or camera_model_val == 'zedxone4k' or camera_model_val == 'zedxonehdr'
         zed_wrapper_component = ComposableNode(
             package='zed_components',
             namespace=namespace_val,
@@ -444,11 +470,12 @@ def launch_setup(context, *args, **kwargs):
             parameters=node_parameters,
             extra_arguments=[{'use_intra_process_comms': enable_ipc_effective}]
         )
-    
+
     full_container_name = '/' + namespace_val + '/' + container_name_val
-    info = 'Loading ZED node `' + node_name_val + '` in container `' + full_container_name + '`'
+    info = 'Loading ZED node `' + node_name_val +\
+        '` in container `' + full_container_name + '`'
     return_array.append(LogInfo(msg=TextSubstitution(text=info)))
-    
+
     load_composable_node = LoadComposableNodes(
         target_container=full_container_name,
         composable_node_descriptions=[zed_wrapper_component]
@@ -456,6 +483,7 @@ def launch_setup(context, *args, **kwargs):
     return_array.append(load_composable_node)
 
     return return_array
+
 
 def generate_launch_description():
     return LaunchDescription(
@@ -474,7 +502,7 @@ def generate_launch_description():
                 'camera_model',
                 default_value='zedx',
                 description='[REQUIRED] The model of the camera. Using a wrong camera model can disable camera features.',
-                choices=['zed', 'zedm', 'zed2', 'zed2i', 'zedx', 'zedxm', 'zedxhdr', 'zedxhdrmini', 'zedxhdrmax', 'virtual', 'zedxonegs', 'zedxone4k', 'zedxonehdr']),
+                choices=['zed', 'zedm', 'zed2', 'zed2i', 'zedx', 'zedxm', 'zedxnano', 'zedxhdr', 'zedxhdrmini', 'zedxhdrmax', 'virtual', 'zedxonegs', 'zedxone4k', 'zedxonehdr']),
             DeclareLaunchArgument(
                 'container_name',
                 default_value='',
@@ -493,11 +521,13 @@ def generate_launch_description():
                 description='The path to an additional parameters file to override the default values.'),
             DeclareLaunchArgument(
                 'object_detection_config_path',
-                default_value=TextSubstitution(text=default_object_detection_config_path),
+                default_value=TextSubstitution(
+                    text=default_object_detection_config_path),
                 description='Path to the YAML configuration file for the Object Detection parameters.'),
             DeclareLaunchArgument(
                 'custom_object_detection_config_path',
-                default_value=TextSubstitution(text=default_custom_object_detection_config_path),
+                default_value=TextSubstitution(
+                    text=default_custom_object_detection_config_path),
                 description='Path to the YAML configuration file for the Custom Object Detection parameters.'),
             DeclareLaunchArgument(
                 'serial_number',
@@ -559,7 +589,10 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 'enable_ipc',
                 default_value='true',
-                description='Enable intra-process communication (IPC) with ROS 2 Composition',
+                description='Enable intra-process communication (IPC) with ROS 2 Composition. '
+                            'When enabled, images are published via TypeAdapter rclcpp publishers '
+                            'for zero-copy intra-process delivery, while image_transport compression '
+                            'plugins (compressed, theora, zstd) remain available on demand.',
                 choices=['true', 'false']),
             DeclareLaunchArgument(
                 'ipc_nitros_conflict_policy',

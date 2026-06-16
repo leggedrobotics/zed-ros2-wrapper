@@ -71,14 +71,29 @@ endif()
 
 #############################################
 # Dependencies
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.27")
+  cmake_policy(SET CMP0146 OLD)
+endif()
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.28")
+  cmake_policy(SET CMP0153 OLD)
+endif()
 find_package(ZED REQUIRED)
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.27")
+  cmake_policy(SET CMP0146 NEW)
+endif()
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.28")
+  cmake_policy(SET CMP0153 NEW)
+endif()
 
-exec_program(uname ARGS -p OUTPUT_VARIABLE CMAKE_SYSTEM_NAME2)
+execute_process(COMMAND uname -p OUTPUT_VARIABLE CMAKE_SYSTEM_NAME2 OUTPUT_STRIP_TRAILING_WHITESPACE)
 if(CMAKE_SYSTEM_NAME2 MATCHES "aarch64") # Jetson TX
     set(CUDA_USE_STATIC_CUDA_RUNTIME OFF)
 endif()
 
-find_package(CUDA REQUIRED)
+find_package(CUDAToolkit REQUIRED)
+set(CUDA_INCLUDE_DIRS ${CUDAToolkit_INCLUDE_DIRS})
+set(CUDA_LIBRARIES CUDA::cudart)
+set(CUDA_LIBRARY_DIRS ${CUDAToolkit_LIBRARY_DIR})
 
 set(DEPENDENCIES
     rclcpp

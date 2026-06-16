@@ -1091,6 +1091,32 @@ void ZedCamera::getGeneralParams()
                         << " is available only with NVIDIA Jetson devices.");
       exit(EXIT_FAILURE);
     }
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 53
+  } else if (camera_model == "zedxnano") {
+    mCamUserModel = sl::MODEL::ZED_X_NANO;
+    if (mSvoMode) {
+      RCLCPP_INFO_STREAM(
+        get_logger(), " + Playing an SVO for "
+          << sl::toString(mCamUserModel)
+          << " camera model.");
+    } else if (mStreamMode) {
+      RCLCPP_INFO_STREAM(
+        get_logger(), " + Playing a network stream from a "
+          << sl::toString(mCamUserModel)
+          << " camera model.");
+    } else if (mSimMode) {
+      RCLCPP_INFO_STREAM(
+        get_logger(), " + Simulating a "
+          << sl::toString(mCamUserModel)
+          << " camera model.");
+    } else if (!IS_JETSON) {
+      RCLCPP_ERROR_STREAM(
+        get_logger(),
+        "Camera model " << sl::toString(mCamUserModel).c_str()
+                        << " is available only with NVIDIA Jetson devices.");
+      exit(EXIT_FAILURE);
+    }
+#endif
   } else if (camera_model == "virtual") {
     mCamUserModel = sl::MODEL::VIRTUAL_ZED_X;
 
@@ -1236,6 +1262,8 @@ void ZedCamera::getGeneralParams()
 #if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 53
       } else if (resol == "XVGA") {
         mCamResol = sl::RESOLUTION::XVGA;
+      } else if (resol == "TXGA") {
+        mCamResol = sl::RESOLUTION::TXGA;
 #endif
       } else {
         RCLCPP_WARN(
@@ -1338,11 +1366,45 @@ void ZedCamera::getGeneralParams()
     mGrabComputeCappingFps, mGrabComputeCappingFps,
     " * Grab Compute Capping FPS: ", false, 0.0,
     static_cast<double>(mCamGrabFrameRate));
+
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 53
+  sl_tools::getParam(
+    shared_from_this(), "general.sdk_use_monotonic_clock",
+    mUseSdkMonotonicClock, mUseSdkMonotonicClock,
+    " * SDK Monotonic Clock: ");
+#endif
 }
 
 void ZedCamera::getSvoParams()
 {
   rclcpp::Parameter paramVal;
+
+  RCLCPP_INFO(get_logger(), "=== SVO RECORDING parameters ===");
+
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 53
+  std::string enc_preset = "DEFAULT";
+  sl_tools::getParam(
+    shared_from_this(), "svo.svo_encoding_preset", enc_preset,
+    enc_preset, " * SVO Encoding preset: ");
+  if (enc_preset == "ULTRAFAST") {
+    mSvoRecEncodingPreset = sl::SVO_ENCODING_PRESET::ULTRAFAST;
+  } else if (enc_preset == "FAST") {
+    mSvoRecEncodingPreset = sl::SVO_ENCODING_PRESET::FAST;
+  } else if (enc_preset == "MEDIUM") {
+    mSvoRecEncodingPreset = sl::SVO_ENCODING_PRESET::MEDIUM;
+  } else if (enc_preset == "SLOW") {
+    mSvoRecEncodingPreset = sl::SVO_ENCODING_PRESET::SLOW;
+  } else {
+    if (enc_preset != "DEFAULT") {
+      RCLCPP_WARN_STREAM(
+        get_logger(),
+        "Invalid 'svo.svo_encoding_preset' value: '"
+          << enc_preset
+          << "'. Valid values: DEFAULT, ULTRAFAST, FAST, MEDIUM, SLOW. Using 'DEFAULT'.");
+    }
+    mSvoRecEncodingPreset = sl::SVO_ENCODING_PRESET::DEFAULT;
+  }
+#endif
 
   RCLCPP_INFO(get_logger(), "=== SVO INPUT parameters ===");
 
@@ -2841,6 +2903,28 @@ bool ZedCamera::startCamera()
   mThreadStop = false;
   mGrabStatus = sl::ERROR_CODE::LAST;
 
+  // Tell sl_tools whether timestamps in this process come from a replay
+  // source (SVO / simulation) so slTime2Ros knows not to apply the live
+  // monotonic-clock offset to file-recorded values. Process-wide.
+  sl_tools::setSdkReplayMode(mSvoMode || mSimMode);
+
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 53
+  if (mUseSdkMonotonicClock) {
+    sl::Camera::setTimestampClock(sl::TIMESTAMP_CLOCK::MONOTONIC_CLOCK);
+    if (sl::Camera::getTimestampClock() != sl::TIMESTAMP_CLOCK::MONOTONIC_CLOCK) {
+      RCLCPP_WARN(
+        get_logger(),
+        "Another node in this process already set the SDK timestamp clock; "
+        "this node's 'general.sdk_use_monotonic_clock' request was ignored.");
+      mUseSdkMonotonicClock = false;
+    } else {
+      RCLCPP_INFO(
+        get_logger(),
+        "SDK timestamp clock set to MONOTONIC_CLOCK (process-wide).");
+    }
+  }
+#endif
+
   while (1) {
     rclcpp::sleep_for(500ms);
 
@@ -2849,6 +2933,20 @@ bool ZedCamera::startCamera()
     if (mConnStatus == sl::ERROR_CODE::SUCCESS) {
       DEBUG_STREAM_COMM("Opening successfull");
       mUptimer.tic(); // Sets the beginning of the camera connection time
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 53
+      if (mUseSdkMonotonicClock && !mSvoMode && !mSimMode) {
+        const sl::Timestamp sdk_now = sl::getCurrentTimeStamp();
+        const rclcpp::Time ros_now = get_clock()->now();
+        const int64_t offset_ns =
+          static_cast<int64_t>(ros_now.nanoseconds()) -
+          static_cast<int64_t>(sdk_now.getNanoseconds());
+        sl_tools::setSdkLiveTimeOffsetNs(offset_ns);
+        RCLCPP_INFO_STREAM(
+          get_logger(),
+          "SDK monotonic-clock offset captured: "
+            << (offset_ns / 1000000) << " ms");
+      }
+#endif
       break;
     }
 
@@ -2879,6 +2977,19 @@ bool ZedCamera::startCamera()
       }
       return false;
     }
+
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 53
+    if (mConnStatus == sl::ERROR_CODE::CAMERA_EXCEEDS_BANDWIDTH) {
+      RCLCPP_ERROR_STREAM(
+        get_logger(),
+        "GMSL PHY CSI bandwidth overflow detected: "
+          << sl::toVerbose(
+          mConnStatus)
+          <<
+          ". Please reduce the camera resolution or FPS, adjust GMSL branching/hardware, or consult the GMSL documentation for platform limits.");
+      return false;
+    }
+#endif
 
     if (mSvoMode) {
       RCLCPP_WARN(
@@ -2984,7 +3095,8 @@ bool ZedCamera::startCamera()
       mVdPubRate = mCamGrabFrameRate;
       RCLCPP_WARN_STREAM(
         get_logger(),
-        "Video/Depth publishing rate was too high [" << mVdPubRate << "], capped to real grab rate: " <<
+        "Video/Depth publishing rate was too high [" << mVdPubRate <<
+          "], capped to real grab rate: " <<
           mCamGrabFrameRate);
     }
     if (mPcPubRate > mCamGrabFrameRate) {
@@ -3050,6 +3162,15 @@ bool ZedCamera::startCamera()
         "Camera model does not match user parameter. Please modify "
         "the value of the parameter 'general.camera_model' to 'zedxm'");
     }
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 53
+  } else if (mCamRealModel == sl::MODEL::ZED_X_NANO) {
+    if (mCamUserModel != sl::MODEL::ZED_X_NANO) {
+      RCLCPP_WARN(
+        get_logger(),
+        "Camera model does not match user parameter. Please modify "
+        "the value of the parameter 'general.camera_model' to 'zedxnano'");
+    }
+#endif
   } else if (mCamRealModel == sl::MODEL::VIRTUAL_ZED_X) {
     if (mCamUserModel != sl::MODEL::VIRTUAL_ZED_X) {
       RCLCPP_WARN(
@@ -3596,8 +3717,8 @@ bool ZedCamera::startCamera()
         sl_tools::slTime2Ros(mZed->getTimestamp(sl::TIME_REFERENCE::IMAGE));
     }
   } else {
-    mFrameTimestamp =
-      sl_tools::slTime2Ros(mZed->getTimestamp(sl::TIME_REFERENCE::IMAGE));
+    mFrameTimestamp = sl_tools::slTime2Ros(
+      mZed->getTimestamp(sl::TIME_REFERENCE::IMAGE));
   }
   // <---- Timestamp
 
@@ -3792,8 +3913,12 @@ void ZedCamera::startFusedPcTimer(double fusedPcRate)
     mFusedPcTimer->cancel();
   }
 
+  if (fusedPcRate <= 0.0) {
+    return;
+  }
+
   std::chrono::milliseconds pubPeriod_msec(
-    static_cast<int>(1000.0 / (fusedPcRate)));
+    static_cast<int>(1000.0 / fusedPcRate));
   mFusedPcTimer = create_wall_timer(
     std::chrono::duration_cast<std::chrono::milliseconds>(pubPeriod_msec),
     std::bind(&ZedCamera::callback_pubFusedPc, this));
@@ -3837,8 +3962,13 @@ void ZedCamera::startPathPubTimer(double pathTimerRate)
 
 bool ZedCamera::startPosTracking()
 {
-  // Lock on Positional Tracking mutex to avoid race conditions
   std::lock_guard<std::mutex> lock(mPtMutex);
+  return startPosTrackingLocked();
+}
+
+bool ZedCamera::startPosTrackingLocked()
+{
+  // Caller must hold mPtMutex.
 
 #if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 52
   // With ZED SDK v5.2 we can use Positional Tracking `GEN_3` even if depth is
@@ -3854,17 +3984,29 @@ bool ZedCamera::startPosTracking()
     return false;
   }
 
+
   if (mZed && mZed->isPositionalTrackingEnabled()) {
     if (!mAreaMemoryFilePath.empty() && mSaveAreaMemoryOnClosing) {
-      mZed->disablePositionalTracking(mAreaMemoryFilePath.c_str());
+      // ----> Safe disablePositionalTracking
+      {
+        std::lock_guard<std::mutex> grab_lock(mGrabMutex);
+        mZed->disablePositionalTracking(mAreaMemoryFilePath.c_str());
+      }
+      // <---- Safe disablePositionalTracking
       RCLCPP_INFO(
         get_logger(),
         "Area memory updated before restarting the Positional "
         "Tracking module.");
     } else {
-      mZed->disablePositionalTracking();
+      // ----> Safe disablePositionalTracking
+      {
+        std::lock_guard<std::mutex> grab_lock(mGrabMutex);
+        mZed->disablePositionalTracking();
+      }
+      // <---- Safe disablePositionalTracking
     }
   }
+
 
   RCLCPP_INFO(get_logger(), "=== Starting Positional Tracking ===");
 
@@ -3951,15 +4093,21 @@ bool ZedCamera::startPosTracking()
     DEBUG_PT(json.c_str());
   }
 
-  sl::ERROR_CODE err = mZed->enablePositionalTracking(ptParams);
+  // ----> Safe enablePositionalTracking
+  sl::ERROR_CODE err;
+  {
+    std::lock_guard<std::mutex> grab_lock(mGrabMutex);
+    err = mZed->enablePositionalTracking(ptParams);
 
-  if (err != sl::ERROR_CODE::SUCCESS) {
-    mPosTrackingStarted = false;
-    RCLCPP_WARN(
-      get_logger(), "Pos. Tracking not started: %s",
-      sl::toString(err).c_str());
-    return false;
+    if (err != sl::ERROR_CODE::SUCCESS) {
+      mPosTrackingStarted = false;
+      RCLCPP_WARN(
+        get_logger(), "Pos. Tracking not started: %s",
+        sl::toString(err).c_str());
+      return false;
+    }
   }
+  // <---- Safe enablePositionalTracking
 
   DEBUG_PT("Positional Tracking started");
 
@@ -3987,18 +4135,23 @@ bool ZedCamera::startPosTracking()
 
     fusion_params.gnss_calibration_parameters = gnss_par;
 
-    sl::FUSION_ERROR_CODE fus_err =
-      mFusion.enablePositionalTracking(fusion_params);
+    // ----> Safe enablePositionalTracking/disablePositionalTracking
+    {
+      std::lock_guard<std::mutex> grab_lock(mGrabMutex);
+      sl::FUSION_ERROR_CODE fus_err =
+        mFusion.enablePositionalTracking(fusion_params);
 
-    if (fus_err != sl::FUSION_ERROR_CODE::SUCCESS) {
-      mPosTrackingStarted = false;
-      RCLCPP_WARN(
-        get_logger(), "Fusion Pos. Tracking not started: %s",
-        sl::toString(fus_err).c_str());
-      mZed->disablePositionalTracking();
-      return false;
+      if (fus_err != sl::FUSION_ERROR_CODE::SUCCESS) {
+        mPosTrackingStarted = false;
+        RCLCPP_WARN(
+          get_logger(), "Fusion Pos. Tracking not started: %s",
+          sl::toString(fus_err).c_str());
+        mZed->disablePositionalTracking();
+        return false;
+      }
+      DEBUG_GNSS("Fusion Positional Tracking started");
     }
-    DEBUG_GNSS("Fusion Positional Tracking started");
+    // <---- Safe enablePositionalTracking/disablePositionalTracking
   }
   // <---- Enable Fusion Positional Tracking if required
 
@@ -4215,6 +4368,9 @@ bool ZedCamera::startSvoRecording(std::string & errMsg)
   params.target_framerate = mSvoRecFramerate;
   params.transcode_streaming_input = mSvoRecTranscode;
   params.video_filename = mSvoRecFilename.c_str();
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 53
+  params.encoding_preset = mSvoRecEncodingPreset;
+#endif
 
   sl::ERROR_CODE err = mZed->enableRecording(params);
   errMsg = sl::toString(err);
@@ -4818,7 +4974,7 @@ void ZedCamera::threadFunc_zedGrab()
 
           // Dummy grab
           mZed->grab();
-  #endif
+#endif
           continue;
         } else {
           mGrabOnce = false; // Reset the flag and grab once
@@ -4956,14 +5112,19 @@ void ZedCamera::threadFunc_zedGrab()
       }
       // <---- Params Debug info
 
-      if (isDepthRequired() || isPosTrackingRequired()) {
-        DEBUG_STREAM_GRAB("Grab thread: grabbing...");
-        mGrabStatus = mZed->grab(mRunParams);  // Process the full pipeline with depth
+      // ----> Safe grab
+      {
+        std::lock_guard<std::mutex> grab_lock(mGrabMutex);
+        if (isDepthRequired() || isPosTrackingRequired()) {
+          DEBUG_STREAM_GRAB("Grab thread: grabbing...");
+          mGrabStatus = mZed->grab(mRunParams);  // Process the full pipeline with depth
 
-      } else {
-        DEBUG_GRAB("Grab thread: reading...");
-        mGrabStatus = mZed->read();  // Image and sensor data reading with no depth processing
+        } else {
+          DEBUG_GRAB("Grab thread: reading...");
+          mGrabStatus = mZed->read();  // Image and sensor data reading with no depth processing
+        }
       }
+      // <---- Safe grab
 
       DEBUG_GRAB("Grab thread: frame grabbed");
 
@@ -4990,8 +5151,8 @@ void ZedCamera::threadFunc_zedGrab()
               mOdomPath.clear();
               mPosePath.clear();
 
-              // Restart tracking
-              startPosTracking();
+              // Restart tracking — mPtMutex is already held by the grab loop
+              startPosTrackingLocked();
             }
             continue;
           } else {
@@ -5098,8 +5259,8 @@ void ZedCamera::threadFunc_zedGrab()
             mZed->getTimestamp(sl::TIME_REFERENCE::IMAGE));
         }
       } else {
-        mFrameTimestamp =
-          sl_tools::slTime2Ros(mZed->getTimestamp(sl::TIME_REFERENCE::IMAGE));
+        mFrameTimestamp = sl_tools::slTime2Ros(
+          mZed->getTimestamp(sl::TIME_REFERENCE::IMAGE));
       }
       //DEBUG_STREAM_COMM("Grab timestamp: " << mFrameTimestamp.nanoseconds() << " nsec");
       // <---- Timestamp
@@ -5141,22 +5302,23 @@ void ZedCamera::threadFunc_zedGrab()
 
       // ----> Check recording status
       DEBUG_STREAM_GRAB("Grab thread: checking recording status");
-      mRecMutex.lock();
-      if (mRecording) {
-        mRecStatus = mZed->getRecordingStatus();
-        static int svo_rec_err_count = 0;
-        if (mRecStatus.is_recording && !mRecStatus.status) {
-          if (++svo_rec_err_count > 3) {
-            rclcpp::Clock steady_clock(RCL_STEADY_TIME);
-            RCLCPP_WARN_THROTTLE(
-              get_logger(), steady_clock, 1000.0,
-              "Error saving frame to SVO");
+      {
+        std::lock_guard<std::mutex> rec_lock(mRecMutex);
+        if (mRecording) {
+          mRecStatus = mZed->getRecordingStatus();
+          static int svo_rec_err_count = 0;
+          if (mRecStatus.is_recording && !mRecStatus.status) {
+            if (++svo_rec_err_count > 3) {
+              rclcpp::Clock steady_clock(RCL_STEADY_TIME);
+              RCLCPP_WARN_THROTTLE(
+                get_logger(), steady_clock, 1000.0,
+                "Error saving frame to SVO");
+            }
+          } else {
+            svo_rec_err_count = 0;
           }
-        } else {
-          svo_rec_err_count = 0;
         }
       }
-      mRecMutex.unlock();
       // <---- Check recording status
 
       // ----> Retrieve Image/Depth data if someone has subscribed to
@@ -5733,7 +5895,8 @@ void ZedCamera::publishCameraTFs(rclcpp::Time t)
   if (std::abs(baseline + stereo_transform.getTranslation().y) > EPSILON) {
     RCLCPP_WARN_STREAM(
       get_logger(),
-      "Baseline mismatch: Camera baseline is " << baseline << " m but calibrated stereo transform y-translation is " <<
+      "Baseline mismatch: Camera baseline is " << baseline <<
+        " m but calibrated stereo transform y-translation is " <<
         stereo_transform.getTranslation().y << " m.");
     not_valid = true;
   }
@@ -5764,6 +5927,9 @@ void ZedCamera::publishCameraTFs(rclcpp::Time t)
       break;
     case sl::MODEL::ZED_X:
     case sl::MODEL::ZED_XM:
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 53
+    case sl::MODEL::ZED_X_NANO:
+#endif
     case sl::MODEL::ZED_X_HDR:
     case sl::MODEL::ZED_X_HDR_MAX:
     case sl::MODEL::ZED_X_HDR_MINI:
@@ -6458,7 +6624,7 @@ void ZedCamera::processPose()
     mPoseLocked = true;
     mPoseLockCount++;
 
-    if (mPoseLockCount > mCamGrabFrameRate) {  // > 1 second
+    if (mPoseLockCount > mCamGrabFrameRate) {   // > 1 second
       RCLCPP_WARN_STREAM(
         get_logger(),
         "Pos. Track. seems to be locked (pose diff.: "
@@ -8570,6 +8736,12 @@ void ZedCamera::callback_updateDiagnostic(
       dropped, total, perc_drop);
     // <---- Frame drop count
 
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 53
+    if (sl_tools::isZEDX(mCamRealModel) && mSceneIlluminance >= 0) {
+      stat.add("Scene Illuminance", mSceneIlluminance);
+    }
+#endif
+
     if (mSimMode) {
       stat.add("Input mode", "SIMULATION");
     } else if (mSvoMode) {
@@ -9555,8 +9727,15 @@ void ZedCamera::callback_setRoi(
 
       if (_nitrosDisabled) {
         if (mPubRoiMask.getTopic().empty()) {
+#ifdef FOUND_HUMBLE
           mPubRoiMask = image_transport::create_publisher(
-            this, mRoiMaskTopic, mQos.get_rmw_qos_profile());
+            this, mRoiMaskTopic,
+            mQos.get_rmw_qos_profile());
+#else
+          mPubRoiMask = image_transport::create_publisher(
+            this, mRoiMaskTopic,
+            mQos.get_rmw_qos_profile(), mPubOpt);
+#endif
           RCLCPP_INFO_STREAM(
             get_logger(), " * Advertised on topic: "
               << mPubRoiMask.getTopic());
@@ -9804,8 +9983,8 @@ void ZedCamera::processRtRoi(rclcpp::Time ts)
 
       if (_nitrosDisabled) {
         publishImageWithInfo(
-          roi_mask, mPubRoiMask, mPubRoiMaskCamInfo, mPubRoiMaskCamInfoTrans, mLeftCamInfoMsg,
-          mLeftCamOptFrameId, ts);
+          roi_mask, mPubIpcRoiMask, mPubRoiMask, mPubRoiMaskCamInfo, mPubRoiMaskCamInfoTrans,
+          mLeftCamInfoMsg, mLeftCamOptFrameId, ts);
       } else {
 #ifdef FOUND_ISAAC_ROS_NITROS
         publishImageWithInfo(
@@ -9898,6 +10077,11 @@ void ZedCamera::publishHealthStatus()
   msg->low_depth_reliability = status.low_depth_reliability;
   msg->low_motion_sensors_reliability =
     status.low_motion_sensors_reliability;
+#if defined(ZED_MSGS_ILLUMINANCE_AVAIL) && \
+  (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 53
+  // Populated periodically in applyZEDXSettings; -1 means unread / unsupported.
+  msg->scene_illuminance = mSceneIlluminance;
+#endif
 
   mPubHealthStatus->publish(std::move(msg));
 }

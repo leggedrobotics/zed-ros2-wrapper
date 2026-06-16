@@ -82,14 +82,31 @@ endif()
 #############################################
 # Dependencies
 find_package(nlohmann_json REQUIRED)
-find_package(ZED REQUIRED)
 
-exec_program(uname ARGS -p OUTPUT_VARIABLE CMAKE_SYSTEM_NAME2)
+# Suppress deprecation warnings from ZED SDK cmake files (uses old CMake features)
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.27")
+  cmake_policy(SET CMP0146 OLD)
+endif()
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.28")
+  cmake_policy(SET CMP0153 OLD)
+endif()
+find_package(ZED REQUIRED)
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.27")
+  cmake_policy(SET CMP0146 NEW)
+endif()
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.28")
+  cmake_policy(SET CMP0153 NEW)
+endif()
+
+execute_process(COMMAND uname -p OUTPUT_VARIABLE CMAKE_SYSTEM_NAME2 OUTPUT_STRIP_TRAILING_WHITESPACE)
 if(CMAKE_SYSTEM_NAME2 MATCHES "aarch64") # Jetson TX
     set(CUDA_USE_STATIC_CUDA_RUNTIME OFF)
 endif()
 
-find_package(CUDA REQUIRED)
+find_package(CUDAToolkit REQUIRED)
+set(CUDA_INCLUDE_DIRS ${CUDAToolkit_INCLUDE_DIRS})
+set(CUDA_LIBRARIES CUDA::cudart)
+set(CUDA_LIBRARY_DIRS ${CUDAToolkit_LIBRARY_DIR})
 
 set(DEPENDENCIES
     rclcpp
@@ -122,6 +139,10 @@ ament_auto_find_build_dependencies()
 
 find_package(rcutils REQUIRED)
 find_package(zed_msgs)
+if(zed_msgs_VERSION VERSION_GREATER "5.3.0")
+  add_definitions(-DZED_MSGS_ILLUMINANCE_AVAIL)
+endif()
+
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_components REQUIRED)
 find_package(builtin_interfaces REQUIRED)
@@ -183,6 +204,18 @@ if(point_cloud_transport_FOUND)
   add_definitions(-DFOUND_POINT_CLOUD_TRANSPORT)
 endif()
 
+# Type Adaptation for sl::Mat <-> sensor_msgs::msg::Image
+# Intra-process subscribers can receive sl::Mat directly without serialization.
+# Requires rclcpp::TypeAdapter which is available from Humble onward.
+set(_PRE_HUMBLE_DISTROS "ardent;bouncy;crystal;dashing;eloquent;foxy;galactic")
+if(ROS2_FOUND AND ${FOUND_ROS2_DISTRO} IN_LIST _PRE_HUMBLE_DISTROS)
+  message(FATAL_ERROR
+    "ROS 2 ${FOUND_ROS2_DISTRO} is not supported by this version of zed_components. "
+    "rclcpp::TypeAdapter (required for zero-copy IPC) is only available "
+    "from Humble onward. Please upgrade to ROS 2 Humble or later.")
+endif()
+message(STATUS " * Type Adaptation for sl::Mat is enabled")
+
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
@@ -217,6 +250,7 @@ set(SL_TOOLS_INC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/tools/include/sl_logging.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/tools/include/gnss_replay.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/tools/include/sl_types.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/tools/include/sl_type_adapter.hpp
 )
 
 set(SL_TOOLS_SRC

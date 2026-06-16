@@ -36,7 +36,7 @@ double WinAvg::setNewSize(size_t win_size)
     mSumVals -= val;
   }
 
-  return mSumVals / mVals.size();
+  return mVals.empty() ? 0.0 : mSumVals / mVals.size();
 }
 
 double WinAvg::addValue(double val)
@@ -63,9 +63,11 @@ double WinAvg::getAvg()
 {
   std::lock_guard<std::mutex> guard(mQueueMux);
 
-  double avg = mSumVals / mVals.size();
+  if (mVals.empty()) {
+    return 0.0;
+  }
 
-  return avg;
+  return mSumVals / mVals.size();
 }
 
 }

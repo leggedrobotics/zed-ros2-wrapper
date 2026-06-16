@@ -12,6 +12,7 @@
             sim_port: 30000 # The connection port of the simulation server. See the documentation of the supported simulation plugins for more information.
 
         svo:
+            svo_encoding_preset: 'DEFAULT' # [SDK >= 5.3] SVO encoder speed/quality preset used by the 'start_svo_rec' service. One of 'DEFAULT', 'ULTRAFAST', 'FAST', 'MEDIUM', 'SLOW'
             decryption_key: "" # Optional decryption key/passphrase when opening encrypted SVO files
             use_svo_timestamps: true # Use the SVO timestamps to publish data. If false, data will be published at the system time.
             publish_svo_clock: false # [overwritten by launch file options] When use_svo_timestamps is true allows to publish the SVO clock to the `/clock` topic. This is useful for synchronous rosbag playback.
@@ -198,6 +199,7 @@
             sdk_verbose: 1 # Set the verbose level of the ZED SDK
             sdk_verbose_log_file: '' # Path to the file where the ZED SDK will log its messages. If empty, no file will be created. The log level can be set using the `sdk_verbose` parameter.
             use_pub_timestamps: false # Use the current ROS time for the message timestamp instead of the camera timestamp. This is useful to test data communication latency.
+            sdk_use_monotonic_clock: false # [SDK >= 5.3] Use sl::TIMESTAMP_CLOCK::MONOTONIC_CLOCK so SDK timestamps are immune to host clock steps (NTP/PTP). Process-wide; first node in a composition wins. When true and 'use_pub_timestamps' is false, an offset captured at camera open keeps Header.stamp ROS-epoch-shaped while inter-frame deltas remain monotonic across system clock steps that happen after open.
             debug_common: false
             debug_dyn_params: false
             debug_grab: false

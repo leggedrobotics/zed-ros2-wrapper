@@ -17,6 +17,7 @@
 #include <unistd.h> // getuid
 
 #include <algorithm>
+#include <atomic>
 #include <sstream>
 #include <vector>
 
@@ -141,12 +142,46 @@ std::string getSDKVersion(int & major, int & minor, int & sub_minor)
   return ver;
 }
 
+namespace
+{
+std::atomic<int64_t> g_sdk_live_time_offset_ns{0};
+std::atomic<bool> g_sdk_replay_mode{false};
+}  // namespace
+
+void setSdkLiveTimeOffsetNs(int64_t offset_ns)
+{
+  g_sdk_live_time_offset_ns.store(offset_ns, std::memory_order_relaxed);
+}
+
+int64_t getSdkLiveTimeOffsetNs()
+{
+  return g_sdk_live_time_offset_ns.load(std::memory_order_relaxed);
+}
+
+void setSdkReplayMode(bool isReplay)
+{
+  g_sdk_replay_mode.store(isReplay, std::memory_order_relaxed);
+}
+
+bool getSdkReplayMode()
+{
+  return g_sdk_replay_mode.load(std::memory_order_relaxed);
+}
+
 rclcpp::Time slTime2Ros(sl::Timestamp t, rcl_clock_type_t clock_type)
 {
-  uint64_t ts_nsec = t.getNanoseconds();
-  uint32_t sec = static_cast<uint32_t>(ts_nsec / 1000000000);
-  uint32_t nsec = static_cast<uint32_t>(ts_nsec % 1000000000);
-  return rclcpp::Time(sec, nsec, clock_type);
+  const bool replay = g_sdk_replay_mode.load(std::memory_order_relaxed);
+  const int64_t offset =
+    replay ? 0 : g_sdk_live_time_offset_ns.load(std::memory_order_relaxed);
+  if (offset == 0) {
+    uint64_t ts_nsec = t.getNanoseconds();
+    uint32_t sec = static_cast<uint32_t>(ts_nsec / 1000000000);
+    uint32_t nsec = static_cast<uint32_t>(ts_nsec % 1000000000);
+    return rclcpp::Time(sec, nsec, clock_type);
+  }
+  const int64_t ts_nsec =
+    static_cast<int64_t>(t.getNanoseconds()) + offset;
+  return rclcpp::Time(ts_nsec, clock_type);
 }
 
 std::unique_ptr<sensor_msgs::msg::Image> imageToROSmsg(
@@ -674,6 +709,11 @@ bool isZEDX(sl::MODEL camModel)
   if (camModel == sl::MODEL::ZED_XM) {
     return true;
   }
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 53
+  if (camModel == sl::MODEL::ZED_X_NANO) {
+    return true;
+  }
+#endif
   if (camModel == sl::MODEL::VIRTUAL_ZED_X) {
     return true;
   }

@@ -200,16 +200,21 @@ bool ZedCamera::startBodyTracking()
   bt_p.max_range = mBodyTrkMaxRange;
   bt_p.prediction_timeout_s = mBodyTrkPredTimeout;
 
-  sl::ERROR_CODE btError = mZed->enableBodyTracking(bt_p);
+  // ----> Safe enableBodyTracking
+  {
+    std::lock_guard<std::mutex> grab_lock(mGrabMutex);
+    sl::ERROR_CODE btError = mZed->enableBodyTracking(bt_p);
 
-  if (btError != sl::ERROR_CODE::SUCCESS) {
-    RCLCPP_ERROR_STREAM(
-      get_logger(),
-      "Body Tracking error: " << sl::toString(btError));
+    if (btError != sl::ERROR_CODE::SUCCESS) {
+      RCLCPP_ERROR_STREAM(
+        get_logger(),
+        "Body Tracking error: " << sl::toString(btError));
 
-    mBodyTrkRunning = false;
-    return false;
+      mBodyTrkRunning = false;
+      return false;
+    }
   }
+  // <---- Safe enableBodyTracking
 
   DEBUG_BT("Body Tracking enabled");
 
@@ -233,7 +238,13 @@ void ZedCamera::stopBodyTracking()
     RCLCPP_INFO(get_logger(), "=== Stopping Body Tracking ===");
     mBodyTrkRunning = false;
     mBodyTrkEnabled = false;
-    mZed->disableBodyTracking();
+
+    // ----> Safe disableBodyTracking
+    {
+      std::lock_guard<std::mutex> grab_lock(mGrabMutex);
+      mZed->disableBodyTracking();
+    }
+    // <---- Safe disableBodyTracking
 
     // ----> Send an empty message to indicate that no more objects are tracked
     // (e.g clean RVIZ2)
