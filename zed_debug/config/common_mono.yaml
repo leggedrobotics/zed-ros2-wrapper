@@ -11,8 +11,10 @@
             gpu_id: -1
             optional_opencv_calibration_file: "" # Optional path where the ZED SDK can find a file containing the calibration information of the camera computed by OpenCV. Read the ZED SDK documentation for more information: https://www.stereolabs.com/docs/api/structsl_1_1InitParameters.html#a9eab2753374ef3baec1d31960859ba19
             publish_status: true # Enable/Disable the publishing of the camera status topic
+            sdk_use_monotonic_clock: false # [SDK >= 5.3] Use sl::TIMESTAMP_CLOCK::MONOTONIC_CLOCK so SDK timestamps are immune to host clock steps (NTP/PTP). Process-wide; first node in a composition wins. When true and 'use_pub_timestamps' is false, an offset captured at camera open keeps Header.stamp ROS-epoch-shaped while inter-frame deltas remain monotonic across system clock steps that happen after open.
 
         svo:
+            svo_encoding_preset: 'DEFAULT' # [SDK >= 5.3] SVO encoder speed/quality preset used by the 'start_svo_rec' service. One of 'DEFAULT', 'ULTRAFAST', 'FAST', 'MEDIUM', 'SLOW'
             decryption_key: "" # Optional decryption key/passphrase when opening encrypted SVO files
             use_svo_timestamps: true # Use the SVO timestamps to publish data. If false, data will be published at the system time.
             publish_svo_clock: true # [overwritten by launch file options] When use_svo_timestamps is true allows to publish the SVO clock to the `/clock` topic. This is useful for synchronous rosbag playback.
@@ -40,6 +42,7 @@
             auto_digital_gain_range_min: 1 # [DYNAMIC] - Defines the minimum range of digital ISP gain in automatic control
             auto_digital_gain_range_max: 256 # [DYNAMIC] - Defines the maximum range of digital ISP gain in automatic control
             denoising: 50 # [DYNAMIC] - Defines the level of denoising applied on both left and right images. Range [0-100]
+            ae_antibanding: 1 # [DYNAMIC] [SDK >= 5.3] AE anti-banding mode. 0=OFF, 1=AUTO, 2=50Hz, 3=60Hz
             enable_24bit_output: false # [SDK >= 5.1] Enable BGR 24-bit output for lower bandwidth usage. If false, BGRA 32-bit output is used (old way before SDK v5.1)
             publish_rgb: true # Advertise the RGB image topics that are published only if a node subscribes to them
             publish_gray: false # Advertise the gray image topics that are published only if a node subscribes to them

@@ -63,11 +63,14 @@ default_xacro_path = os.path.join(
 )
 
 # Function to parse array-like launch arguments
+
+
 def parse_array_param(param):
     cleaned = param.replace('[', '').replace(']', '').replace(' ', '')
     if not cleaned:
         return []
     return cleaned.split(',')
+
 
 def launch_setup(context, *args, **kwargs):
     return_array = []
@@ -93,8 +96,10 @@ def launch_setup(context, *args, **kwargs):
     node_name = LaunchConfiguration('node_name')
 
     ros_params_override_path = LaunchConfiguration('ros_params_override_path')
-    object_detection_config_path = LaunchConfiguration('object_detection_config_path')
-    custom_object_detection_config_path = LaunchConfiguration('custom_object_detection_config_path')
+    object_detection_config_path = LaunchConfiguration(
+        'object_detection_config_path')
+    custom_object_detection_config_path = LaunchConfiguration(
+        'custom_object_detection_config_path')
 
     serial_number = LaunchConfiguration('serial_number')
     camera_id = LaunchConfiguration('camera_id')
@@ -113,10 +118,10 @@ def launch_setup(context, *args, **kwargs):
 
     cmd_prefix = LaunchConfiguration('cmd_prefix')
 
-    if( cmd_prefix.perform(context) == ''):
+    if (cmd_prefix.perform(context) == ''):
         prefix_string = ''
     else:
-        #prefix_string = 'xterm -geometry 250x40  -e ' + cmd_prefix.perform(context)
+        # prefix_string = 'xterm -geometry 250x40  -e ' + cmd_prefix.perform(context)
         prefix_string = cmd_prefix.perform(context)
         info = 'Using command prefix: `' + prefix_string + '`'
         return_array.append(LogInfo(msg=TextSubstitution(text=info)))
@@ -131,13 +136,13 @@ def launch_setup(context, *args, **kwargs):
     serial_numbers_val = serial_numbers.perform(context)
     camera_ids_val = camera_ids.perform(context)
 
-    if(node_log_type_val == 'both'):
+    if (node_log_type_val == 'both'):
         node_log_effective = 'both'
     else:  # 'screen' or 'log'
         node_log_effective = {
             'stdout': node_log_type_val,
             'stderr': node_log_type_val
-            }
+        }
 
     if (camera_name_val == ''):
         camera_name_val = 'zed'
@@ -148,28 +153,29 @@ def launch_setup(context, *args, **kwargs):
         ids = parse_array_param(camera_ids_val)
 
         # If not in live mode, at least one of serials or ids must be a valid 2-values array
-        if(len(serials) != 2 and len(ids) != 2 and svo_path.perform(context) == 'live'):
+        if (len(serials) != 2 and len(ids) != 2 and svo_path.perform(context) == 'live'):
             return [
                 LogInfo(msg=TextSubstitution(
                     text='With a Virtual Stereo Camera setup, one of `serial_numbers` or `camera_ids` launch arguments must contain two valid values (Left and Right camera identification).'))
             ]
-    
-    if(namespace_val == ''):
+
+    if (namespace_val == ''):
         namespace_val = camera_name_val + '_debug'
     else:
         node_name_val = camera_name_val + '_debug'
-    
+
     # Common configuration file
-    if (camera_model_val == 'zed' or 
-        camera_model_val == 'zedm' or 
-        camera_model_val == 'zed2' or 
-        camera_model_val == 'zed2i' or 
-        camera_model_val == 'zedx' or 
+    if (camera_model_val == 'zed' or
+        camera_model_val == 'zedm' or
+        camera_model_val == 'zed2' or
+        camera_model_val == 'zed2i' or
+        camera_model_val == 'zedx' or
         camera_model_val == 'zedxm' or
+        camera_model_val == 'zedxnano' or
         camera_model_val == 'zedxhdr' or
         camera_model_val == 'zedxhdrmini' or
         camera_model_val == 'zedxhdrmax' or
-        camera_model_val == 'virtual'):
+            camera_model_val == 'virtual'):
         config_common_path_val = default_config_common + '_stereo.yaml'
     else:
         config_common_path_val = default_config_common + '_mono.yaml'
@@ -188,16 +194,18 @@ def launch_setup(context, *args, **kwargs):
     return_array.append(LogInfo(msg=TextSubstitution(text=info)))
 
     # Object Detection configuration file
-    info = 'Using Object Detection configuration file: ' + object_detection_config_path.perform(context)
+    info = 'Using Object Detection configuration file: ' +\
+        object_detection_config_path.perform(context)
     return_array.append(LogInfo(msg=TextSubstitution(text=info)))
-    
+
     # Custom Object Detection configuration file
-    info = 'Using Custom Object Detection configuration file: ' + custom_object_detection_config_path.perform(context)
+    info = 'Using Custom Object Detection configuration file: ' +\
+        custom_object_detection_config_path.perform(context)
     return_array.append(LogInfo(msg=TextSubstitution(text=info)))
 
     # ROS parameters override file
     ros_params_override_path_val = ros_params_override_path.perform(context)
-    if(ros_params_override_path_val != ''):
+    if (ros_params_override_path_val != ''):
         info = 'Using ROS parameters override file: ' + ros_params_override_path_val
         return_array.append(LogInfo(msg=TextSubstitution(text=info)))
 
@@ -213,11 +221,11 @@ def launch_setup(context, *args, **kwargs):
     xacro_command.append('camera_model:=')
     xacro_command.append(camera_model_val)
     xacro_command.append(' ')
-    if(enable_gnss_val=='true'):
+    if (enable_gnss_val == 'true'):
         xacro_command.append(' ')
         xacro_command.append('enable_gnss:=true')
         xacro_command.append(' ')
-        if(len(gnss_coords)==3):
+        if (len(gnss_coords) == 3):
             xacro_command.append('gnss_x:=')
             xacro_command.append(gnss_coords[0])
             xacro_command.append(' ')
@@ -244,24 +252,25 @@ def launch_setup(context, *args, **kwargs):
         remappings=[('robot_description', camera_name_val+'_description')]
     )
     return_array.append(rsp_node)
-  
+
     # ZED Node parameters
     node_parameters = []
 
     # Add YAML files
-    if(config_common_path_val != ''):
+    if (config_common_path_val != ''):
         node_parameters.append(config_common_path_val)
-    if(config_camera_path != ''):
+    if (config_camera_path != ''):
         node_parameters.append(config_camera_path)
-    if(object_detection_config_path != ''):
+    if (object_detection_config_path != ''):
         node_parameters.append(object_detection_config_path.perform(context))
-    if(custom_object_detection_config_path != ''):
-        node_parameters.append(custom_object_detection_config_path.perform(context))
-    if( ros_params_override_path_val != ''):
+    if (custom_object_detection_config_path != ''):
+        node_parameters.append(
+            custom_object_detection_config_path.perform(context))
+    if (ros_params_override_path_val != ''):
         node_parameters.append(ros_params_override_path.perform(context))
-        
+
     # Add launch arguments overrides
-    node_parameters.append( 
+    node_parameters.append(
         # Launch arguments must override the YAML files values
         {
             'use_sim_time': use_sim_time,
@@ -287,9 +296,9 @@ def launch_setup(context, *args, **kwargs):
 
     # Select what camera component to load in the Executor at Runtime
     exe_args = []
-    if( camera_model_val == 'zedxonegs' or
+    if (camera_model_val == 'zedxonegs' or
         camera_model_val == 'zedxone4k' or
-        camera_model_val == 'zedxonehdr' ):
+            camera_model_val == 'zedxonehdr'):
         exe_args.append('--monocular')
 
     # ZED Wrapper node with hardcoded container
@@ -307,6 +316,7 @@ def launch_setup(context, *args, **kwargs):
 
     return return_array
 
+
 def generate_launch_description():
     return LaunchDescription(
         [
@@ -323,7 +333,7 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 'camera_model',
                 description='[REQUIRED] The model of the camera. Using a wrong camera model can disable camera features.',
-                choices=['zed', 'zedm', 'zed2', 'zed2i', 'zedx', 'zedxm', 'zedxhdr', 'zedxhdrmini', 'zedxhdrmax', 'virtual', 'zedxonegs', 'zedxone4k', 'zedxonehdr']),
+                choices=['zed', 'zedm', 'zed2', 'zed2i', 'zedx', 'zedxm', 'zedxnano', 'zedxhdr', 'zedxhdrmini', 'zedxhdrmax', 'virtual', 'zedxonegs', 'zedxone4k', 'zedxonehdr']),
             DeclareLaunchArgument(
                 'namespace',
                 default_value='',
@@ -338,11 +348,13 @@ def generate_launch_description():
                 description='The path to an additional parameters file to override the default values.'),
             DeclareLaunchArgument(
                 'object_detection_config_path',
-                default_value=TextSubstitution(text=default_object_detection_config_path),
+                default_value=TextSubstitution(
+                    text=default_object_detection_config_path),
                 description='Path to the YAML configuration file for the Object Detection parameters.'),
             DeclareLaunchArgument(
                 'custom_object_detection_config_path',
-                default_value=TextSubstitution(text=default_custom_object_detection_config_path),
+                default_value=TextSubstitution(
+                    text=default_custom_object_detection_config_path),
                 description='Path to the YAML configuration file for the Custom Object Detection parameters.'),
             DeclareLaunchArgument(
                 'serial_number',
