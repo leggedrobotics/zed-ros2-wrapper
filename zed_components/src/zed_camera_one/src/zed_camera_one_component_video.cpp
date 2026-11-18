@@ -15,10 +15,16 @@
 #include "zed_camera_one_component.hpp"
 #include "sl_logging.hpp"
 
+#include <mutex>
 #include <image_transport/camera_common.hpp>
 
-#include <sensor_msgs/distortion_models.hpp>
 #include <sensor_msgs/image_encodings.hpp>
+
+namespace
+{
+// Same race guard as in zed_camera_component_video_depth.cpp: see comment there.
+std::mutex g_it_pub_init_mutex;
+}
 
 namespace stereolabs
 {
@@ -77,7 +83,7 @@ void ZedCameraOne::getVideoParams()
   sl_tools::getParam(
     shared_from_this(), "video.exposure_compensation",
     _camExposureComp, _camExposureComp,
-    " * Exposure Compensation: ", true, 0, 100);
+    " * Exposure Compensation: ", true, -1, 100);
   _camDynParMapChanged["video.exposure_compensation"] = true;
   sl_tools::getParam(
     shared_from_this(), "video.auto_analog_gain",
@@ -122,6 +128,14 @@ void ZedCameraOne::getVideoParams()
     _camDenoising, " * Denoising: ", true, 0, 100);
   _camDynParMapChanged["video.denoising"] = true;
 
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 53
+  sl_tools::getParam(
+    shared_from_this(), "video.ae_antibanding", _camAEAntibanding,
+    _camAEAntibanding,
+    " * AE Anti-banding (-1=not set,0=OFF,1=AUTO,2=50Hz,3=60Hz): ", true, -1, 3);
+  _camDynParMapChanged["video.ae_antibanding"] = true;
+#endif
+
   _triggerUpdateDynParams = true;
 }
 
@@ -154,48 +168,154 @@ void ZedCameraOne::initVideoPublishers()
   // ----> Create publishers
   auto qos = _qos.get_rmw_qos_profile();
 
-  // Publishers logging
+  // Publishers logging: reads back the actual enabled plugins for this topic
   auto log_cam_pub = [&](const auto & pub) {
       RCLCPP_INFO_STREAM(
         get_logger(),
         "  * Advertised on topic: " << pub.getTopic());
-      auto transports = image_transport::getLoadableTransports();
-      for (const auto & transport : transports) {
-        std::string transport_copy = transport;
-        auto pos = transport_copy.find('/');
+
+      auto ns_len = get_effective_namespace().length();
+      std::string param_base = pub.getTopic().substr(ns_len);
+      std::replace(param_base.begin(), param_base.end(), '/', '.');
+      if (!param_base.empty() && param_base.front() == '.') {
+        param_base = param_base.substr(1);
+      }
+
+      std::vector<std::string> enabled;
+      try {
+        enabled = get_parameter(
+          param_base + ".enable_pub_plugins").get_value<std::vector<std::string>>();
+      } catch (...) {
+        try {
+          enabled = image_transport::getDeclaredTransports();
+        } catch (...) {
+        }
+      }
+
+      for (const auto & transport : enabled) {
+        std::string suffix = transport;
+        auto pos = suffix.find('/');
         if (pos != std::string::npos) {
-          transport_copy.erase(0, pos);
+          suffix.erase(0, pos);
         }
         RCLCPP_INFO_STREAM(
           get_logger(), "  * Advertised on topic: "
-            << pub.getTopic() << transport_copy
+            << pub.getTopic() << suffix
             << " [image_transport]");
       }
+    };
+
+  // Lambda to configure image_transport plugins for a topic based on its
+  // data type. The raw plugin is always excluded (IPC TypeAdapter handles
+  // the base topic). Additionally, plugins incompatible with the topic's
+  // encoding are filtered out:
+  //   IMAGE  (sl::VIEW, 8-bit):    compressed ✓, theora ✓, compressedDepth ✗
+  //   MEASURE (sl::MEASURE, float): compressedDepth ✓, compressed ✗, theora ✗
+  // Unknown/future plugins (e.g. zstd) are allowed for all types.
+  auto set_transport_plugins =
+    [&](const std::string & topic, ImageTopicType type = ImageTopicType::IMAGE) {
+      std::string resolved = rclcpp::expand_topic_or_service_name(
+        topic, get_name(), get_namespace());
+      auto ns_len = get_effective_namespace().length();
+      std::string param_base = resolved.substr(ns_len);
+      std::replace(param_base.begin(), param_base.end(), '/', '.');
+      if (param_base.front() == '.') {
+        param_base = param_base.substr(1);
+      }
+      std::vector<std::string> allowed;
+      try {
+        auto all = image_transport::getDeclaredTransports();
+        for (const auto & t : all) {
+          if (t.find("/raw") != std::string::npos) {
+            continue;
+          }
+          bool is_compressed_depth = (t.find("/compressedDepth") != std::string::npos);
+          bool is_compressed = !is_compressed_depth && (t.find("/compressed") != std::string::npos);
+          bool is_theora = (t.find("/theora") != std::string::npos);
+
+          if (is_compressed_depth) {
+            if (type == ImageTopicType::MEASURE) {
+              allowed.push_back(t);
+            }
+          } else if (is_compressed || is_theora) {
+            if (type == ImageTopicType::IMAGE) {
+              allowed.push_back(t);
+            }
+          } else {
+            allowed.push_back(t);
+          }
+        }
+      } catch (...) {
+        RCLCPP_WARN(get_logger(), "Failed to get declared transports for plugin filtering");
+        return;
+      }
+      if (allowed.empty()) {
+        RCLCPP_WARN(
+          get_logger(),
+          "No compatible transports found for topic %s, falling back to all plugins",
+          topic.c_str());
+        return;
+      }
+      try {
+        declare_parameter(param_base + ".enable_pub_plugins", allowed);
+      } catch (const rclcpp::exceptions::ParameterAlreadyDeclaredException &) {
+        auto val = get_parameter(
+          param_base + ".enable_pub_plugins").get_value<std::vector<std::string>>();
+        for (const auto & t : val) {
+          if (t.find("/raw") != std::string::npos) {
+            RCLCPP_WARN(
+              get_logger(),
+              "Raw transport enabled via parameter override: "
+              "this may cause duplicate messages on topic: %s", topic.c_str());
+          }
+        }
+      }
+    };
+
+  // Lambda to create IPC-aware publisher alongside image_transport
+  auto create_ipc_pub = [&](const std::string & topic) -> adaptedImagePub {
+      auto pub = create_publisher<SlImageAdapter>(topic, _qos);
+      RCLCPP_INFO_STREAM(
+        get_logger(),
+        "  * Advertised on topic: " << pub->get_topic_name() << " [IPC type-adapted zero-copy]");
+      return pub;
+    };
+
+  auto create_dual_pub = [&](
+    const std::string & topic,
+    adaptedImagePub & ipcPub,
+    image_transport::Publisher & itPub,
+    ImageTopicType type = ImageTopicType::IMAGE) {
+      ipcPub = create_ipc_pub(topic);
+      {
+        std::lock_guard<std::mutex> lock(g_it_pub_init_mutex);
+        set_transport_plugins(topic, type);
+#ifdef FOUND_HUMBLE
+        itPub = image_transport::create_publisher(this, topic, qos);
+#else
+        itPub = image_transport::create_publisher(this, topic, qos, _pubOpt);
+#endif
+      }
+      log_cam_pub(itPub);
     };
 
   // Camera publishers
   if (_nitrosDisabled) {
     if (_publishImgRgb) {
-      _pubColorImg = image_transport::create_publisher(this, _imgColorTopic, qos);
-      log_cam_pub(_pubColorImg);
+      create_dual_pub(_imgColorTopic, _pubIpcColorImg, _pubColorImg);
 
       if (_publishImgRaw) {
-        _pubColorRawImg = image_transport::create_publisher(this, _imgColorRawTopic, qos);
-        log_cam_pub(_pubColorRawImg);
+        create_dual_pub(_imgColorRawTopic, _pubIpcColorRawImg, _pubColorRawImg);
       }
     }
 
     if (_publishImgGray) {
-      _pubGrayImg = image_transport::create_publisher(this, _imgGrayTopic, qos);
-      log_cam_pub(_pubGrayImg);
+      create_dual_pub(_imgGrayTopic, _pubIpcGrayImg, _pubGrayImg);
 
       if (_publishImgRaw) {
-        _pubGrayRawImg = image_transport::create_publisher(this, _imgRawGrayTopic, qos);
-        log_cam_pub(_pubGrayRawImg);
+        create_dual_pub(_imgRawGrayTopic, _pubIpcGrayRawImg, _pubGrayRawImg);
       }
     }
-
-
   } else {
 #ifdef FOUND_ISAAC_ROS_NITROS
     // Nitros publishers lambda
@@ -231,7 +351,7 @@ void ZedCameraOne::initVideoPublishers()
   // Lambda to create and log CameraInfo publishers
   auto make_cam_info_pub = [&](const std::string & topic) {
       std::string info_topic = image_transport::getCameraInfoTopic(topic);
-      auto pub = create_publisher<sensor_msgs::msg::CameraInfo>(info_topic, _qos);
+      auto pub = create_publisher<sensor_msgs::msg::CameraInfo>(info_topic, _qos, _pubOpt);
       RCLCPP_INFO_STREAM(get_logger(), "  * Advertised on topic: " << pub->get_topic_name());
       return pub;
     };
@@ -239,7 +359,7 @@ void ZedCameraOne::initVideoPublishers()
   // Lambda to create and log CameraInfo publishers for image_transport or nitros
   auto make_cam_info_trans_pub = [&](const std::string & topic) {
       std::string info_topic = topic + "/camera_info";
-      auto pub = create_publisher<sensor_msgs::msg::CameraInfo>(info_topic, _qos);
+      auto pub = create_publisher<sensor_msgs::msg::CameraInfo>(info_topic, _qos, _pubOpt);
       RCLCPP_INFO_STREAM(
         get_logger(),
         "  * Advertised on topic: " << pub->get_topic_name());
@@ -284,19 +404,11 @@ void ZedCameraOne::fillCamInfo(
   // https://docs.ros2.org/latest/api/sensor_msgs/msg/CameraInfo.html
 
   // ----> Distortion models
-  // ZED SDK params order: [ k1, k2, p1, p2, k3, k4, k5, k6, s1, s2, s3, s4]
-  // Radial (k1, k2, k3, k4, k5, k6), Tangential (p1,p2) and Prism (s1, s2, s3,
-  // s4) distortion. Prism not currently used.
-
-  // ROS2 order (OpenCV) -> k1,k2,p1,p2,k3,k4,k5,k6,s1,s2,s3,s4
-  // All ZED X One models use RATIONAL_POLYNOMIAL
-  camInfoMsg->distortion_model =
-    sensor_msgs::distortion_models::RATIONAL_POLYNOMIAL;
-
-  camInfoMsg->d.resize(8);
-  for (size_t i = 0; i < 8; i++) {
-    camInfoMsg->d[i] = zedParam.disto[i];
-  }
+  // Taken from the model reported by the ZED SDK for these calibration
+  // parameters, not assumed to be the same for every ZED X One: a fisheye lens
+  // uses a different model than the wide and narrow ones.
+  sl_tools::fillCamInfoDistortion(zedParam, *camInfoMsg);
+  // <---- Distortion models
 
   // Intrinsic
   camInfoMsg->k.fill(0.0);
@@ -345,10 +457,14 @@ bool ZedCameraOne::areImageTopicsSubscribed()
 
   try {
     if (_nitrosDisabled) {
-      _colorSubCount = _pubColorImg.getNumSubscribers();
-      _colorRawSubCount = _pubColorRawImg.getNumSubscribers();
-      _graySubCount = _pubGrayImg.getNumSubscribers();
-      _grayRawSubCount = _pubGrayRawImg.getNumSubscribers();
+      // Generic lambda for imagePub or adaptedImagePub
+      auto ipc_sub_count = [](const auto & pub) -> size_t {
+          return pub ? pub->get_subscription_count() : 0;
+        };
+      _colorSubCount = _pubColorImg.getNumSubscribers() + ipc_sub_count(_pubIpcColorImg);
+      _colorRawSubCount = _pubColorRawImg.getNumSubscribers() + ipc_sub_count(_pubIpcColorRawImg);
+      _graySubCount = _pubGrayImg.getNumSubscribers() + ipc_sub_count(_pubIpcGrayImg);
+      _grayRawSubCount = _pubGrayRawImg.getNumSubscribers() + ipc_sub_count(_pubIpcGrayRawImg);
     } else {
 #ifdef FOUND_ISAAC_ROS_NITROS
       _colorSubCount = count_subscribers(_imgColorTopic) + count_subscribers(
@@ -378,7 +494,8 @@ void ZedCameraOne::handleImageRetrievalAndPublishing()
   if (_imageSubscribed) {
     DEBUG_STREAM_VD("Retrieving video data");
 
-    bool gpu = false;
+    // Retrieve on GPU the images published with the CUDA transport
+    bool gpu = _cudaBufferActive;
 #ifdef FOUND_ISAAC_ROS_NITROS
     if (!_nitrosDisabled) {
       gpu = true;
@@ -490,7 +607,10 @@ void ZedCameraOne::publishImages()
   _lastTs_grab = _sdkGrabTS;
 
   rclcpp::Time timeStamp;
-  if (_svoMode) {
+  if (_svoMode || _simMode) {
+    // Replayed and simulated frames are stamped by `updateFrameTimestamp()`,
+    // which is the only place that knows whether the SVO/simulation clock has
+    // to replace the SDK timestamp.
     timeStamp = _frameTimestamp;
   } else {
     timeStamp = sl_tools::slTime2Ros(_sdkGrabTS, get_clock()->get_clock_type());
@@ -523,7 +643,7 @@ void ZedCameraOne::publishColorImage(const rclcpp::Time & timeStamp)
     DEBUG_STREAM_VD("_colorSubCount: " << _colorSubCount);
     if (_nitrosDisabled) {
       publishImageWithInfo(
-        _matColor, _pubColorImg, _pubColorImgInfo, _pubColorImgInfoTrans,
+        _matColor, _pubIpcColorImg, _pubColorImg, _pubColorImgInfo, _pubColorImgInfoTrans,
         _camInfoMsg, _camOptFrameId, timeStamp);
     } else {
 #ifdef FOUND_ISAAC_ROS_NITROS
@@ -544,7 +664,7 @@ void ZedCameraOne::publishColorRawImage(const rclcpp::Time & timeStamp)
     DEBUG_STREAM_VD("_colorRawSubCount: " << _colorRawSubCount);
     if (_nitrosDisabled) {
       publishImageWithInfo(
-        _matColorRaw, _pubColorRawImg, _pubColorRawImgInfo,
+        _matColorRaw, _pubIpcColorRawImg, _pubColorRawImg, _pubColorRawImgInfo,
         _pubColorRawImgInfoTrans, _camInfoRawMsg, _camOptFrameId, timeStamp);
     } else {
 #ifdef FOUND_ISAAC_ROS_NITROS
@@ -565,7 +685,7 @@ void ZedCameraOne::publishGrayImage(const rclcpp::Time & timeStamp)
     DEBUG_STREAM_VD("_graySubCount: " << _graySubCount);
     if (_nitrosDisabled) {
       publishImageWithInfo(
-        _matGray, _pubGrayImg, _pubGrayImgInfo, _pubGrayImgInfoTrans,
+        _matGray, _pubIpcGrayImg, _pubGrayImg, _pubGrayImgInfo, _pubGrayImgInfoTrans,
         _camInfoMsg, _camOptFrameId, timeStamp);
     } else {
 #ifdef FOUND_ISAAC_ROS_NITROS
@@ -586,7 +706,7 @@ void ZedCameraOne::publishGrayRawImage(const rclcpp::Time & timeStamp)
     DEBUG_STREAM_VD("_grayRawSubCount: " << _grayRawSubCount);
     if (_nitrosDisabled) {
       publishImageWithInfo(
-        _matGrayRaw, _pubGrayRawImg, _pubGrayRawImgInfo,
+        _matGrayRaw, _pubIpcGrayRawImg, _pubGrayRawImg, _pubGrayRawImgInfo,
         _pubGrayRawImgInfoTrans, _camInfoRawMsg, _camOptFrameId, timeStamp);
     } else {
 #ifdef FOUND_ISAAC_ROS_NITROS
@@ -610,7 +730,7 @@ void ZedCameraOne::publishCameraInfo(
   camInfoMsg->header.stamp = ts;
 
   if (infoPub) {
-    if (count_subscribers(infoPub->get_topic_name()) > 0) {
+    if (infoPub->get_subscription_count() > 0) {
       infoPub->publish(*camInfoMsg);
       DEBUG_STREAM_VD(
         " * Camera Info message published: " << infoPub->get_topic_name());
@@ -640,6 +760,64 @@ void ZedCameraOne::publishImageWithInfo(
     DEBUG_STREAM_COMM("Message publishing generic exception: ");
   }
 }
+
+void ZedCameraOne::publishImageWithInfo(
+  const sl::Mat & img,
+  const adaptedImagePub & ipcPubImg,
+  const image_transport::Publisher & itPubImg,
+  const camInfoPub & infoPub,
+  const camInfoPub & infoPubTrans,
+  camInfoMsgPtr & camInfoMsg,
+  const std::string & imgFrameId,
+  const rclcpp::Time & t)
+{
+  auto stamp = _usePubTimestamps ? get_clock()->now() : t;
+  DEBUG_STREAM_VD(
+    "Publishing IMAGE message (type-adapted IPC): " << stamp.nanoseconds() <<
+      " nsec");
+  try {
+    publishCameraInfo(infoPub, camInfoMsg, stamp);
+    publishCameraInfo(infoPubTrans, camInfoMsg, stamp);
+
+    // Image retrieved on GPU for the CUDA transport
+    if (img.getMemoryType() == sl::MEM::GPU) {
+      publishGpuImage(img, ipcPubImg, itPubImg, imgFrameId, stamp);
+      return;
+    }
+
+    // Publish image_transport first for compression-plugin subscribers.
+    // This IPC path publishes an independent StampedSlMat message,
+    // so no std::move ordering constraint applies in this branch.
+
+    // Publish to image_transport for compression plugin subscribers
+    if (itPubImg.getNumSubscribers() > 0) {
+      auto image = sl_tools::imageToROSmsg(img, imgFrameId, t, _usePubTimestamps);
+      itPubImg.publish(std::move(image));
+    }
+
+    // Publish sl::Mat directly via type-adapted publisher (zero-copy for IPC)
+    if (ipcPubImg && ipcPubImg->get_subscription_count() > 0) {
+      stereolabs::StampedSlMat adapted_msg;
+      if (ipcPubImg->get_intra_process_subscription_count() > 0) {
+        // Intra-process delivery is asynchronous and the image buffer is
+        // reused at the next grab: the subscriber needs its own copy
+        adapted_msg.mat.clone(img);
+      } else {
+        // Only subscribers in other processes: the message is converted to
+        // a ROS message inside publish(), the shallow copy is enough
+        adapted_msg.mat = img;
+      }
+      adapted_msg.frame_id = imgFrameId;
+      adapted_msg.stamp = stamp;
+      ipcPubImg->publish(adapted_msg);
+    }
+  } catch (std::system_error & e) {
+    DEBUG_STREAM_COMM("Message publishing exception: " << e.what());
+  } catch (...) {
+    DEBUG_STREAM_COMM("Message publishing generic exception: ");
+  }
+}
+
 #ifdef FOUND_ISAAC_ROS_NITROS
 void ZedCameraOne::publishImageWithInfo(
   const sl::Mat & img,
@@ -736,30 +914,105 @@ void ZedCameraOne::applyDynamicSettings()
     DEBUG_COMM(" * NONE");
   }
 
-  _triggerUpdateDynParams = (count > 0);
+  // Settings not applied yet are retried at the next grab
+  if (count > 0) {
+    _triggerUpdateDynParams = true;
+  }
 
   DEBUG_STREAM_COMM("=== Dynamic settings applied ===");
+}
+
+void ZedCameraOne::setVideoSetting(
+  sl::VIDEO_SETTINGS setting, int value,
+  const std::string & settingName)
+{
+  if (!_camDynParMapChanged[settingName]) {
+    return;
+  }
+  if (!isVideoSettingAvailable(setting)) {
+    _camDynParMapChanged[settingName] = false;
+    DEBUG_STREAM_COMM(
+      "'" << settingName <<
+        "' not available on this camera or in its current mode: not set");
+    return;
+  }
+  sl::ERROR_CODE ret_code = _zed->setCameraSettings(setting, value);
+  if (ret_code == sl::ERROR_CODE::SUCCESS) {
+    _camDynParMapChanged[settingName] = false;
+    DEBUG_STREAM_COMM("Set " << settingName << " to " << value);
+  } else if (sl_tools::isVideoSettingRejected(ret_code)) {
+    // Retrying cannot help: report it once, until the parameter changes again
+    _camDynParMapChanged[settingName] = false;
+    if (_simMode) {
+      RCLCPP_INFO_STREAM(
+        get_logger(), "'" << settingName << "' is not supported by the simulator: not applied.");
+      return;
+    }
+    RCLCPP_WARN_STREAM(
+      get_logger(), "'" << settingName << "' not applied (" << sl::toString(ret_code).c_str()
+                        << "): see the ZED SDK message for the reason. It is not retried until "
+        "it changes.");
+  } else {
+    RCLCPP_WARN_STREAM(
+      get_logger(), "Error setting "
+        << settingName << ": "
+        << sl::toString(ret_code));
+  }
+}
+
+bool ZedCameraOne::setVideoSettingRange(
+  sl::VIDEO_SETTINGS setting, int value_min, int value_max,
+  const std::string & settingName_min, const std::string & settingName_max)
+{
+  if (!_camDynParMapChanged[settingName_min] && !_camDynParMapChanged[settingName_max]) {
+    return true;
+  }
+  if (!isVideoSettingAvailable(setting)) {
+    _camDynParMapChanged[settingName_min] = false;
+    _camDynParMapChanged[settingName_max] = false;
+    DEBUG_STREAM_COMM(
+      "The range ['" << settingName_min << "','" << settingName_max
+                     << "'] not available on this camera or in its current mode: not set");
+    return false;
+  }
+  sl::ERROR_CODE ret_code = _zed->setCameraSettings(setting, value_min, value_max);
+  if (ret_code == sl::ERROR_CODE::SUCCESS) {
+    _camDynParMapChanged[settingName_min] = false;
+    _camDynParMapChanged[settingName_max] = false;
+    DEBUG_STREAM_COMM("Set " << settingName_min << " to " << value_min);
+    DEBUG_STREAM_COMM("Set " << settingName_max << " to " << value_max);
+    return true;
+  }
+  if (sl_tools::isVideoSettingRejected(ret_code)) {
+    // Retrying cannot help: report it once, until the parameters change again
+    _camDynParMapChanged[settingName_min] = false;
+    _camDynParMapChanged[settingName_max] = false;
+    RCLCPP_WARN_STREAM(
+      get_logger(), "The range ['" << settingName_min << "','" << settingName_max
+                                   << "'] not applied (" << sl::toString(ret_code).c_str()
+                                   << "): see the ZED SDK message for the reason. It is not "
+        "retried until it changes.");
+  } else {
+    RCLCPP_WARN_STREAM(
+      get_logger(), "Error setting the range of ["
+        << settingName_min << "," << settingName_max << "]: "
+        << sl::toString(ret_code));
+  }
+  return false;
+}
+
+bool ZedCameraOne::isVideoSettingAvailable(sl::VIDEO_SETTINGS setting)
+{
+  // SVO, stream and simulation: the setting is sent and the input reports it
+  if (_svoMode || _streamMode || _simMode) {
+    return true;
+  }
+  return _zed->isCameraSettingSupported(setting);
 }
 
 // Helper function for saturation, sharpness, gamma
 void ZedCameraOne::applySaturationSharpnessGamma()
 {
-  auto setVideoSetting = [this](sl::VIDEO_SETTINGS setting, int value,
-      const std::string & settingName) {
-      if (this->_camDynParMapChanged[settingName]) {
-        sl::ERROR_CODE ret_code = _zed->setCameraSettings(setting, value);
-        if (ret_code != sl::ERROR_CODE::SUCCESS) {
-          RCLCPP_WARN_STREAM(
-            get_logger(), "Error setting "
-              << settingName << ": "
-              << sl::toString(ret_code));
-        } else {
-          this->_camDynParMapChanged[settingName] = false;
-          DEBUG_STREAM_COMM("Set " << settingName << " to " << value);
-        }
-      }
-    };
-
   setVideoSetting(sl::VIDEO_SETTINGS::SATURATION, _camSaturation, "video.saturation");
   setVideoSetting(sl::VIDEO_SETTINGS::SHARPNESS, _camSharpness, "video.sharpness");
   setVideoSetting(sl::VIDEO_SETTINGS::GAMMA, _camGamma, "video.gamma");
@@ -768,22 +1021,6 @@ void ZedCameraOne::applySaturationSharpnessGamma()
 // Helper function for white balance
 void ZedCameraOne::applyWhiteBalance()
 {
-  auto setVideoSetting = [this](sl::VIDEO_SETTINGS setting, int value,
-      const std::string & settingName) {
-      if (this->_camDynParMapChanged[settingName]) {
-        sl::ERROR_CODE ret_code = _zed->setCameraSettings(setting, value);
-        if (ret_code != sl::ERROR_CODE::SUCCESS) {
-          RCLCPP_WARN_STREAM(
-            get_logger(), "Error setting "
-              << settingName << ": "
-              << sl::toString(ret_code));
-        } else {
-          this->_camDynParMapChanged[settingName] = false;
-          DEBUG_STREAM_COMM("Set " << settingName << " to " << value);
-        }
-      }
-    };
-
   setVideoSetting(sl::VIDEO_SETTINGS::WHITEBALANCE_AUTO, _camAutoWB, "video.auto_whitebalance");
   if (!_camAutoWB) {
     setVideoSetting(
@@ -798,46 +1035,6 @@ void ZedCameraOne::applyWhiteBalance()
 // Helper function for exposure
 void ZedCameraOne::applyExposure()
 {
-  auto setVideoSetting = [this](sl::VIDEO_SETTINGS setting, int value,
-      const std::string & settingName) {
-      if (this->_camDynParMapChanged[settingName]) {
-        sl::ERROR_CODE ret_code = _zed->setCameraSettings(setting, value);
-        if (ret_code != sl::ERROR_CODE::SUCCESS) {
-          RCLCPP_WARN_STREAM(
-            get_logger(), "Error setting "
-              << settingName << ": "
-              << sl::toString(ret_code));
-        } else {
-          this->_camDynParMapChanged[settingName] = false;
-          DEBUG_STREAM_COMM("Set " << settingName << " to " << value);
-        }
-      }
-    };
-
-  auto setVideoSettingRange = [this](sl::VIDEO_SETTINGS setting, int value_min,
-      int value_max, const std::string & settingName_min, const std::string & settingName_max) {
-      if (this->_camDynParMapChanged[settingName_min] ||
-        this->_camDynParMapChanged[settingName_max])
-      {
-        sl::ERROR_CODE ret_code = _zed->setCameraSettings(setting, value_min, value_max);
-        if (ret_code != sl::ERROR_CODE::SUCCESS) {
-          RCLCPP_WARN_STREAM(
-            get_logger(), "Error setting the range of ["
-              << settingName_min << "," << settingName_max << ": "
-              << sl::toString(ret_code));
-          return false;
-        } else {
-          this->_camDynParMapChanged[settingName_min] = false;
-          this->_camDynParMapChanged[settingName_max] = false;
-          DEBUG_STREAM_COMM("Set " << settingName_min << " to " << value_min);
-          DEBUG_STREAM_COMM("Set " << settingName_max << " to " << value_max);
-          return true;
-        }
-        return false;
-      }
-      return true;
-    };
-
   if (_camAutoExposure) {
     if (_camDynParMapChanged["video.auto_exposure"]) {
       set_parameters(
@@ -893,46 +1090,6 @@ void ZedCameraOne::applyExposure()
 // Helper function for analog gain
 void ZedCameraOne::applyAnalogGain()
 {
-  auto setVideoSetting = [this](sl::VIDEO_SETTINGS setting, int value,
-      const std::string & settingName) {
-      if (this->_camDynParMapChanged[settingName]) {
-        sl::ERROR_CODE ret_code = _zed->setCameraSettings(setting, value);
-        if (ret_code != sl::ERROR_CODE::SUCCESS) {
-          RCLCPP_WARN_STREAM(
-            get_logger(), "Error setting "
-              << settingName << ": "
-              << sl::toString(ret_code));
-        } else {
-          this->_camDynParMapChanged[settingName] = false;
-          DEBUG_STREAM_COMM("Set " << settingName << " to " << value);
-        }
-      }
-    };
-
-  auto setVideoSettingRange = [this](sl::VIDEO_SETTINGS setting, int value_min,
-      int value_max, const std::string & settingName_min, const std::string & settingName_max) {
-      if (this->_camDynParMapChanged[settingName_min] ||
-        this->_camDynParMapChanged[settingName_max])
-      {
-        sl::ERROR_CODE ret_code = _zed->setCameraSettings(setting, value_min, value_max);
-        if (ret_code != sl::ERROR_CODE::SUCCESS) {
-          RCLCPP_WARN_STREAM(
-            get_logger(), "Error setting the range of ["
-              << settingName_min << "," << settingName_max << ": "
-              << sl::toString(ret_code));
-          return false;
-        } else {
-          this->_camDynParMapChanged[settingName_min] = false;
-          this->_camDynParMapChanged[settingName_max] = false;
-          DEBUG_STREAM_COMM("Set " << settingName_min << " to " << value_min);
-          DEBUG_STREAM_COMM("Set " << settingName_max << " to " << value_max);
-          return true;
-        }
-        return false;
-      }
-      return true;
-    };
-
   if (_camAutoAnalogGain) {
     if (_camDynParMapChanged["video.auto_analog_gain"]) {
       set_parameters(
@@ -987,46 +1144,6 @@ void ZedCameraOne::applyAnalogGain()
 // Helper function for digital gain
 void ZedCameraOne::applyDigitalGain()
 {
-  auto setVideoSetting = [this](sl::VIDEO_SETTINGS setting, int value,
-      const std::string & settingName) {
-      if (this->_camDynParMapChanged[settingName]) {
-        sl::ERROR_CODE ret_code = _zed->setCameraSettings(setting, value);
-        if (ret_code != sl::ERROR_CODE::SUCCESS) {
-          RCLCPP_WARN_STREAM(
-            get_logger(), "Error setting "
-              << settingName << ": "
-              << sl::toString(ret_code));
-        } else {
-          this->_camDynParMapChanged[settingName] = false;
-          DEBUG_STREAM_COMM("Set " << settingName << " to " << value);
-        }
-      }
-    };
-
-  auto setVideoSettingRange = [this](sl::VIDEO_SETTINGS setting, int value_min,
-      int value_max, const std::string & settingName_min, const std::string & settingName_max) {
-      if (this->_camDynParMapChanged[settingName_min] ||
-        this->_camDynParMapChanged[settingName_max])
-      {
-        sl::ERROR_CODE ret_code = _zed->setCameraSettings(setting, value_min, value_max);
-        if (ret_code != sl::ERROR_CODE::SUCCESS) {
-          RCLCPP_WARN_STREAM(
-            get_logger(), "Error setting the range of ["
-              << settingName_min << "," << settingName_max << ": "
-              << sl::toString(ret_code));
-          return false;
-        } else {
-          this->_camDynParMapChanged[settingName_min] = false;
-          this->_camDynParMapChanged[settingName_max] = false;
-          DEBUG_STREAM_COMM("Set " << settingName_min << " to " << value_min);
-          DEBUG_STREAM_COMM("Set " << settingName_max << " to " << value_max);
-          return true;
-        }
-        return false;
-      }
-      return true;
-    };
-
   if (_camAutoDigitalGain) {
     if (_camDynParMapChanged["video.auto_digital_gain"]) {
       set_parameters(
@@ -1081,27 +1198,34 @@ void ZedCameraOne::applyDigitalGain()
 // Helper function for exposure compensation and denoising
 void ZedCameraOne::applyExposureCompensationAndDenoising()
 {
-  auto setVideoSetting = [this](sl::VIDEO_SETTINGS setting, int value,
-      const std::string & settingName) {
-      if (this->_camDynParMapChanged[settingName]) {
-        sl::ERROR_CODE ret_code = _zed->setCameraSettings(setting, value);
-        if (ret_code != sl::ERROR_CODE::SUCCESS) {
-          RCLCPP_WARN_STREAM(
-            get_logger(), "Error setting "
-              << settingName << ": "
-              << sl::toString(ret_code));
-        } else {
-          this->_camDynParMapChanged[settingName] = false;
-          DEBUG_STREAM_COMM("Set " << settingName << " to " << value);
-        }
-      }
-    };
-
-  setVideoSetting(
-    sl::VIDEO_SETTINGS::EXPOSURE_COMPENSATION, _camExposureComp,
-    "video.exposure_compensation");
+  // -1: not set by the node, the camera keeps its current value
+  if (_camExposureComp >= 0) {
+    setVideoSetting(
+      sl::VIDEO_SETTINGS::EXPOSURE_COMPENSATION, _camExposureComp,
+      "video.exposure_compensation");
+  } else {
+    _camDynParMapChanged["video.exposure_compensation"] = false;
+  }
 
   setVideoSetting(sl::VIDEO_SETTINGS::DENOISING, _camDenoising, "video.denoising");
+
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 53
+  if (_camAEAntibanding >= 0) {
+    setVideoSetting(
+      sl::VIDEO_SETTINGS::AE_ANTIBANDING, _camAEAntibanding,
+      "video.ae_antibanding");
+  } else {
+    _camDynParMapChanged["video.ae_antibanding"] = false;
+  }
+
+  // Read-only metric: scene illuminance (cached for diagnostic publication)
+  int illum = -1;
+  if (_zed->getCameraSettings(sl::VIDEO_SETTINGS::SCENE_ILLUMINANCE, illum) ==
+    sl::ERROR_CODE::SUCCESS)
+  {
+    _sceneIlluminance = illum;
+  }
+#endif
 }
 
 void ZedCameraOne::publishCameraInfos()
@@ -1117,5 +1241,163 @@ void ZedCameraOne::publishCameraInfos()
   publishCameraInfo(_pubGrayImgInfoTrans, _camInfoMsg, pub_ts);
   publishCameraInfo(_pubGrayRawImgInfoTrans, _camInfoRawMsg, pub_ts);
 }
+
+// ----> `rosidl::Buffer` CUDA transport
+
+void ZedCameraOne::initCudaBufferTransport()
+{
+  _cudaBufferActive = false;
+
+  if (_bufferBackend != "cuda") {
+    RCLCPP_INFO(get_logger(), " * Buffer transport: CPU [general.buffer_backend: 'cpu']");
+    return;
+  }
+
+#ifdef FOUND_CUDA_BUFFER
+  std::string rmw_reason;
+  if (!sl_tools::isCudaBufferRmwSupported(rmw_get_implementation_identifier(), rmw_reason)) {
+    RCLCPP_INFO_STREAM(
+      get_logger(),
+      " * Buffer transport: CPU [CUDA zero-copy not available: " << rmw_reason << "]");
+    return;
+  }
+
+  std::vector<std::string> installed;
+  if (!sl_tools::isCudaBufferBackendInstalled(installed)) {
+    std::string list;
+    for (const auto & name : installed) {
+      list += (list.empty() ? "" : ", ") + name;
+    }
+    RCLCPP_WARN_STREAM(
+      get_logger(),
+      " * Buffer transport: CPU [the '" << sl_tools::CUDA_BUFFER_BACKEND
+                                        << "' buffer backend plugin is not installed. "
+                                        << "Installed backends: [" << list
+                                        << "]. Build the 'cuda_buffer_backend' package from "
+                                        << "source in your workspace "
+                                        << "(https://github.com/ros2/rosidl_buffer_backends) "
+                                        << "to enable the CUDA zero-copy transport. Do not "
+                                        << "install its Debian package: it is built for the "
+                                        << "CUDA 12 runtime and the NVIDIA desktop drivers]");
+    return;
+  }
+
+  // sl::CameraOne does not expose its CUDA context: use the one of its CUDA
+  // stream, or the one made current by `open()`
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 52
+  CUstream sdk_stream = _zed->getCUDAStream();
+#else
+  CUstream sdk_stream = nullptr;  // `sl::CameraOne::getCUDAStream` requires ZED SDK 5.2
+#endif
+  CUcontext sdk_ctx = nullptr;
+  if (!sdk_stream) {
+    cuCtxGetCurrent(&sdk_ctx);
+  }
+
+  _cudaBuffer = std::make_unique<sl_tools::CudaBufferTransport>();
+  std::string err;
+  // sl::CameraOne::retrieveImage has no stream parameter: the copies wait for
+  // the GPU work of the SDK, which is safe because the images are published
+  // in the grab thread before the next grab
+  if (!_cudaBuffer->init(sdk_ctx, sdk_stream, false, err)) {
+    RCLCPP_WARN_STREAM(
+      get_logger(),
+      " * Buffer transport: CPU [CUDA zero-copy initialization failed: " << err << "]");
+    _cudaBuffer.reset();
+    return;
+  }
+
+  _cudaBufferActive = true;
+  RCLCPP_INFO(
+    get_logger(),
+    " * Buffer transport: CUDA zero-copy [automatic CPU fallback for subscribers "
+    "that cannot use it]");
+  if (_qos.durability() == rclcpp::DurabilityPolicy::TransientLocal) {
+    RCLCPP_WARN(
+      get_logger(),
+      "   The CUDA zero-copy transport does not support the TRANSIENT_LOCAL "
+      "durability: CPU data will be published");
+  }
+#else
+  RCLCPP_INFO(
+    get_logger(),
+    " * Buffer transport: CPU [CUDA zero-copy not available: it requires ROS 2 "
+    "Lyrical or newer with the 'cuda_buffer' package]");
+#endif
+}
+
+void ZedCameraOne::resetCudaBufferTransport()
+{
+  _cudaBufferActive = false;
+#ifdef FOUND_CUDA_BUFFER
+  _cudaBuffer.reset();
+#endif
+}
+
+void ZedCameraOne::publishGpuImage(
+  const sl::Mat & img, const adaptedImagePub & ipcPubImg,
+  const image_transport::Publisher & itPubImg,
+  const std::string & imgFrameId, const rclcpp::Time & stamp)
+{
+  sl_tools::BufferRoute route = sl_tools::getBufferRoute(ipcPubImg);
+  std::string err;
+
+#ifdef FOUND_CUDA_BUFFER
+  if (route.cuda && _cudaBuffer) {
+    auto msg = std::make_unique<sensor_msgs::msg::Image>();
+    msg->header.stamp = stamp;
+    msg->header.frame_id = imgFrameId;
+    if (_cudaBuffer->toImageMsg(img, *msg, err)) {
+      DEBUG_STREAM_VD("Publishing CUDA IMAGE message on " << ipcPubImg->get_topic_name());
+      ipcPubImg->publish(std::move(msg));
+    } else {
+      RCLCPP_WARN_STREAM_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "Cannot publish CUDA data on '" << ipcPubImg->get_topic_name() << "': " << err
+                                        << ". Publishing CPU data.");
+      route.cpu = true;
+    }
+  } else
+#endif
+  {
+    route.cpu |= route.cuda;
+  }
+
+  // The compression plugins of image_transport require CPU data
+  const bool it_sub = itPubImg.getNumSubscribers() > 0;
+  if (!route.cpu && !it_sub) {
+    return;
+  }
+
+  stereolabs::StampedSlMat cpu_msg;
+  bool ok = false;
+#ifdef FOUND_CUDA_BUFFER
+  if (_cudaBuffer) {
+    ok = _cudaBuffer->download(img, cpu_msg.mat, err);
+  } else
+#endif
+  {
+    sl::ERROR_CODE sl_err = img.copyTo(cpu_msg.mat, sl::COPY_TYPE::GPU_CPU);
+    ok = (sl_err == sl::ERROR_CODE::SUCCESS);
+    err = sl::toString(sl_err).c_str();
+  }
+  if (!ok) {
+    RCLCPP_WARN_STREAM_THROTTLE(
+      get_logger(), *get_clock(), 5000,
+      "Cannot copy the GPU data to CPU: " << err);
+    return;
+  }
+
+  if (it_sub) {
+    itPubImg.publish(sl_tools::imageToROSmsg(cpu_msg.mat, imgFrameId, stamp, false));
+  }
+
+  if (route.cpu) {
+    cpu_msg.frame_id = imgFrameId;
+    cpu_msg.stamp = stamp;
+    ipcPubImg->publish(std::move(cpu_msg));
+  }
+}
+// <---- `rosidl::Buffer` CUDA transport
 
 }

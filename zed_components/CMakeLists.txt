@@ -15,7 +15,7 @@ if(DEFINED ENV{ROS_DISTRO})
     #message("* Found ROS2 ${FOUND_ROS2_DISTRO}")
 else()
     message("* ROS2 distro variable not set. Trying to figure it out...")
-    set(ROS2_DISTROS "ardent;bouncy;crystal;dashing;eloquent;foxy;galactic;humble;iron;jazzy;kilted;rolling")
+    set(ROS2_DISTROS "ardent;bouncy;crystal;dashing;eloquent;foxy;galactic;humble;iron;jazzy;kilted;lyrical;rolling")
     set(ROS2_FOUND FALSE)
     foreach(distro ${ROS2_DISTROS})
         if(NOT ROS2_FOUND)
@@ -36,12 +36,13 @@ if(ROS2_FOUND)
     elseif(${FOUND_ROS2_DISTRO} STREQUAL "humble")
         #message("* ROS2 ${FOUND_ROS2_DISTRO} is officially supported by this package.")
         add_definitions(-DFOUND_HUMBLE)
-    elseif(${FOUND_ROS2_DISTRO} STREQUAL "iron")
-        #message("* ROS2 ${FOUND_ROS2_DISTRO} is officially supported by this package.")
-	    add_definitions(-DFOUND_IRON)    
     elseif(${FOUND_ROS2_DISTRO} STREQUAL "jazzy")
         #message("* ROS2 ${FOUND_ROS2_DISTRO} is officially supported by this package.")
         add_definitions(-DFOUND_JAZZY)
+    elseif(${FOUND_ROS2_DISTRO} STREQUAL "lyrical")
+        add_definitions(-DFOUND_LYRICAL)
+    elseif(${FOUND_ROS2_DISTRO} STREQUAL "rolling")
+        add_definitions(-DFOUND_ROLLING)
     else()
         message("*** WARNING *** Unsupported ROS2 ${FOUND_ROS2_DISTRO}. '${PROJECT_NAME}' may not work correctly.")
     endif()
@@ -82,14 +83,31 @@ endif()
 #############################################
 # Dependencies
 find_package(nlohmann_json REQUIRED)
-find_package(ZED REQUIRED)
 
-exec_program(uname ARGS -p OUTPUT_VARIABLE CMAKE_SYSTEM_NAME2)
+# Suppress deprecation warnings from ZED SDK cmake files (uses old CMake features)
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.27")
+  cmake_policy(SET CMP0146 OLD)
+endif()
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.28")
+  cmake_policy(SET CMP0153 OLD)
+endif()
+find_package(ZED 5.0.7 REQUIRED)  # Keep in sync with SDK_*_MIN_SUPP in sl_version.hpp
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.27")
+  cmake_policy(SET CMP0146 NEW)
+endif()
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.28")
+  cmake_policy(SET CMP0153 NEW)
+endif()
+
+execute_process(COMMAND uname -p OUTPUT_VARIABLE CMAKE_SYSTEM_NAME2 OUTPUT_STRIP_TRAILING_WHITESPACE)
 if(CMAKE_SYSTEM_NAME2 MATCHES "aarch64") # Jetson TX
     set(CUDA_USE_STATIC_CUDA_RUNTIME OFF)
 endif()
 
-find_package(CUDA REQUIRED)
+find_package(CUDAToolkit REQUIRED)
+set(CUDA_INCLUDE_DIRS ${CUDAToolkit_INCLUDE_DIRS})
+set(CUDA_LIBRARIES CUDA::cudart)
+set(CUDA_LIBRARY_DIRS ${CUDAToolkit_LIBRARY_DIR})
 
 set(DEPENDENCIES
     rclcpp
@@ -122,6 +140,17 @@ ament_auto_find_build_dependencies()
 
 find_package(rcutils REQUIRED)
 find_package(zed_msgs)
+if(zed_msgs_VERSION VERSION_GREATER_EQUAL "5.3.0")
+  add_definitions(-DZED_MSGS_ILLUMINANCE_AVAIL)
+endif()
+if(zed_msgs_VERSION VERSION_GREATER_EQUAL "5.5.0")
+  add_definitions(-DZED_MSGS_DUPLICATED_IMAGE_AVAIL)
+  add_definitions(-DZED_MSGS_POSE_CONFIDENCE_AVAIL)
+endif()
+if(zed_msgs_VERSION VERSION_GREATER_EQUAL "5.6.0")
+  add_definitions(-DZED_MSGS_FUSION_STATUS_AVAIL)
+endif()
+
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_components REQUIRED)
 find_package(builtin_interfaces REQUIRED)
@@ -148,31 +177,35 @@ find_package(robot_localization REQUIRED)
 find_package(backward_ros REQUIRED)
 
 # Check ISAAC ROS Nitros availability
-find_package(isaac_ros_common QUIET)
-if(isaac_ros_common_FOUND)
-  find_package(isaac_ros_nitros)
-  if(isaac_ros_nitros_FOUND)
-      find_package(isaac_ros_managed_nitros QUIET)
-      if(isaac_ros_managed_nitros_FOUND)
-          find_package(isaac_ros_nitros_image_type QUIET)
-          if(isaac_ros_nitros_image_type_FOUND)
-            list(APPEND DEPENDENCIES isaac_ros_common)
-            list(APPEND DEPENDENCIES isaac_ros_nitros)
-            list(APPEND DEPENDENCIES isaac_ros_managed_nitros)
-            list(APPEND DEPENDENCIES isaac_ros_nitros_image_type)
-            add_definitions(-DFOUND_ISAAC_ROS_NITROS)
-            message(" * ISAAC ROS Nitros transport is available")
-          else()
-            message(WARNING " * 'isaac_ros_nitros_image_type' not found, ISAAC ROS NITROS transport will not be available.")
-          endif()
-      else()
-        message(WARNING " * 'isaac_ros_managed_nitros' not found, ISAAC ROS NITROS transport will not be available.")
-      endif()
-  else()
-    message(WARNING " * 'isaac_ros_nitros' not found, ISAAC ROS NITROS transport will not be available.")
+# NITROS was removed in Isaac ROS 5 (ROS 2 Lyrical): the distributions are in alphabetical order,
+# so it is searched only for the distributions released before Lyrical
+if("${FOUND_ROS2_DISTRO}" STRLESS "lyrical")
+  find_package(isaac_ros_common QUIET)
+  if(isaac_ros_common_FOUND)
+    find_package(isaac_ros_nitros)
+    if(isaac_ros_nitros_FOUND)
+        find_package(isaac_ros_managed_nitros QUIET)
+        if(isaac_ros_managed_nitros_FOUND)
+            find_package(isaac_ros_nitros_image_type QUIET)
+            if(isaac_ros_nitros_image_type_FOUND)
+              list(APPEND DEPENDENCIES isaac_ros_common)
+              list(APPEND DEPENDENCIES isaac_ros_nitros)
+              list(APPEND DEPENDENCIES isaac_ros_managed_nitros)
+              list(APPEND DEPENDENCIES isaac_ros_nitros_image_type)
+              add_definitions(-DFOUND_ISAAC_ROS_NITROS)
+              message(" * ISAAC ROS Nitros transport is available")
+            else()
+              message(WARNING " * 'isaac_ros_nitros_image_type' not found, ISAAC ROS NITROS transport will not be available.")
+            endif()
+        else()
+          message(WARNING " * 'isaac_ros_managed_nitros' not found, ISAAC ROS NITROS transport will not be available.")
+        endif()
+    else()
+      message(WARNING " * 'isaac_ros_nitros' not found, ISAAC ROS NITROS transport will not be available.")
+    endif()
+  #else()
+  #  message(" * 'isaac_ros_common' not found, ISAAC ROS NITROS transport will not be available.")
   endif()
-#else()
-#  message(" * 'isaac_ros_common' not found, ISAAC ROS NITROS transport will not be available.")
 endif()
 
 # Check Point Cloud Transport availability
@@ -182,6 +215,36 @@ if(point_cloud_transport_FOUND)
   message(" * Point Cloud Transport is available")
   add_definitions(-DFOUND_POINT_CLOUD_TRANSPORT)
 endif()
+
+# Check `rosidl::Buffer` CUDA zero-copy transport availability (ROS 2 Lyrical and newer)
+find_package(rosidl_buffer QUIET)
+if(rosidl_buffer_FOUND)
+  find_package(cuda_buffer QUIET)
+  find_package(rosidl_buffer_backend_registry QUIET)
+  if(cuda_buffer_FOUND AND rosidl_buffer_backend_registry_FOUND)
+    # Used to check the version of the RMW implementation
+    find_package(ament_index_cpp REQUIRED)
+    list(APPEND DEPENDENCIES cuda_buffer)
+    list(APPEND DEPENDENCIES rosidl_buffer_backend_registry)
+    list(APPEND DEPENDENCIES ament_index_cpp)
+    add_definitions(-DFOUND_CUDA_BUFFER)
+    message(" * rosidl::Buffer CUDA zero-copy transport is available")
+  else()
+    message(WARNING " * 'cuda_buffer' or 'rosidl_buffer_backend_registry' not found, rosidl::Buffer CUDA zero-copy transport will not be available.")
+  endif()
+endif()
+
+# Type Adaptation for sl::Mat <-> sensor_msgs::msg::Image
+# Intra-process subscribers can receive sl::Mat directly without serialization.
+# Requires rclcpp::TypeAdapter which is available from Humble onward.
+set(_PRE_HUMBLE_DISTROS "ardent;bouncy;crystal;dashing;eloquent;foxy;galactic")
+if(ROS2_FOUND AND ${FOUND_ROS2_DISTRO} IN_LIST _PRE_HUMBLE_DISTROS)
+  message(FATAL_ERROR
+    "ROS 2 ${FOUND_ROS2_DISTRO} is not supported by this version of zed_components. "
+    "rclcpp::TypeAdapter (required for zero-copy IPC) is only available "
+    "from Humble onward. Please upgrade to ROS 2 Humble or later.")
+endif()
+message(STATUS " * Type Adaptation for sl::Mat is enabled")
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -193,6 +256,27 @@ endif()
 # a dummy_target so qtcreator have access to all files
 file(GLOB_RECURSE all_files ${CMAKE_CURRENT_SOURCE_DIR}/*)
 add_custom_target(all_${PROJECT_NAME}_files SOURCES ${all_files})
+
+###############################################################################
+# ament_target_dependencies() replacement: ROS 2 Lyrical's ament_cmake removed
+# that macro outright. For each dependency, link its exported modern CMake
+# target(s) (${dep}_TARGETS), falling back to the classic
+# ${dep}_INCLUDE_DIRS / ${dep}_LIBRARIES variables for dependencies that only
+# export those (e.g. backward_ros).
+macro(zed_link_ros_dependencies target)
+  foreach(_dep ${ARGN})
+    if(${_dep}_TARGETS)
+      target_link_libraries(${target} ${${_dep}_TARGETS})
+    else()
+      if(${_dep}_INCLUDE_DIRS)
+        target_include_directories(${target} PUBLIC ${${_dep}_INCLUDE_DIRS})
+      endif()
+      if(${_dep}_LIBRARIES)
+        target_link_libraries(${target} ${${_dep}_LIBRARIES})
+      endif()
+    endif()
+  endforeach()
+endmacro()
 
 ###############################################################################
 # LIBS
@@ -217,6 +301,8 @@ set(SL_TOOLS_INC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/tools/include/sl_logging.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/tools/include/gnss_replay.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/tools/include/sl_types.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/tools/include/sl_type_adapter.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/tools/include/sl_cuda_buffer.hpp
 )
 
 set(SL_TOOLS_SRC
@@ -224,6 +310,7 @@ set(SL_TOOLS_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/tools/src/sl_win_avg.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/tools/src/gnss_replay.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/tools/src/sl_types.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/tools/src/sl_cuda_buffer.cpp
 )
 
 set(ZED_CAMERA_INC
@@ -273,9 +360,7 @@ target_compile_definitions(zed_camera_component
 target_link_libraries(zed_camera_component
     ${ZED_LIBS}
 )
-ament_target_dependencies(zed_camera_component
-    ${DEPENDENCIES}
-)
+zed_link_ros_dependencies(zed_camera_component ${DEPENDENCIES})
 
 rclcpp_components_register_nodes(zed_camera_component "stereolabs::ZedCamera")
 set(node_plugins "${node_plugins}stereolabs::ZedCamera;$<TARGET_FILE:zed_camera_component>\n")
@@ -300,9 +385,7 @@ target_compile_definitions(zed_camera_one_component
 target_link_libraries(zed_camera_one_component
     ${ZED_LIBS}
 )
-ament_target_dependencies(zed_camera_one_component
-    ${DEPENDENCIES}
-)
+zed_link_ros_dependencies(zed_camera_one_component ${DEPENDENCIES})
 
 rclcpp_components_register_nodes(zed_camera_one_component "stereolabs::ZedCameraOne")
 set(node_plugins "${node_plugins}stereolabs::ZedCameraOne;$<TARGET_FILE:zed_camera_one_component>\n")

@@ -23,10 +23,19 @@
 #include "sl_version.hpp"
 #include "sl_tools.hpp"
 #include "sl_types.hpp"
+#include "sl_cuda_buffer.hpp"
 #include "visibility_control.hpp"
 
 namespace stereolabs
 {
+
+// Categorizes image topics for transport plugin filtering.
+// IMAGE: visual data from sl::VIEW (8-bit: BGRA8, BGR8, MONO8)
+// MEASURE: metric data from sl::MEASURE (float: 32FC1, or 16UC1 in OpenNI mode)
+#ifndef STEREOLABS_IMAGE_TOPIC_TYPE_DEFINED
+#define STEREOLABS_IMAGE_TOPIC_TYPE_DEFINED
+enum class ImageTopicType { IMAGE, MEASURE };
+#endif
 
 class ZedCameraOne : public rclcpp::Node
 {
@@ -39,12 +48,16 @@ public:
 protected:
   // ----> Initialization functions
   void initNode();
+  void initNodeImpl();
   void deInitNode();
+  void stopOnFatalError(const std::string & reason);
+  void callback_fatalError();
 
   void initParameters();
   void initServices();
   void initTFCoordFrameNames();
   void initPublishers();
+  void initSubscribers();
   void initVideoPublishers();
   void initSensorPublishers();
   void initializeTimestamp();
@@ -57,6 +70,7 @@ protected:
   void getGeneralParams();
   void getTopicEnableParams();
   void getSvoParams();
+  void getSimParams();
   void getStreamParams();
   void getCameraModelParams();
   void getCameraInfoParams();
@@ -68,6 +82,8 @@ protected:
 
   bool startCamera();
   void closeCamera();
+  void rebootCamera(std::shared_ptr<std_srvs::srv::Trigger_Response> res);
+  bool reopenCamera();
   void createZedObject();
   void logSdkVersion();
   void setupTf2();
@@ -91,6 +107,15 @@ protected:
     const std::string & frameId, bool rawParam = false);
 
   void applyDynamicSettings();
+  // Apply a changed video setting (or range). A setting refused for good by the
+  // camera or the input is reported once and not retried until it changes again.
+  void setVideoSetting(sl::VIDEO_SETTINGS setting, int value, const std::string & settingName);
+  bool setVideoSettingRange(
+    sl::VIDEO_SETTINGS setting, int value_min, int value_max,
+    const std::string & settingName_min, const std::string & settingName_max);
+  // False if the live camera does not have this setting (e.g. no white balance
+  // on the ZED X One HDR): the node then does not send it
+  bool isVideoSettingAvailable(sl::VIDEO_SETTINGS setting);
   void applySaturationSharpnessGamma();
   void applyWhiteBalance();
   void applyExposure();
@@ -116,6 +141,19 @@ protected:
     camInfoMsgPtr & camInfoMsg,
     const std::string & imgFrameId,
     const rclcpp::Time & t);
+
+  // IPC-aware overload: publishes zero-copy via rclcpp::Publisher and
+  // compressed via image_transport when subscribers exist
+  void publishImageWithInfo(
+    const sl::Mat & img,
+    const adaptedImagePub & ipcPubImg,
+    const image_transport::Publisher & itPubImg,
+    const camInfoPub & infoPub,
+    const camInfoPub & infoPubTrans,
+    camInfoMsgPtr & camInfoMsg,
+    const std::string & imgFrameId,
+    const rclcpp::Time & t);
+
 #ifdef FOUND_ISAAC_ROS_NITROS
   void publishImageWithInfo(
     const sl::Mat & img,
@@ -129,6 +167,15 @@ protected:
   void publishCameraInfo(
     const camInfoPub & infoPub,
     camInfoMsgPtr & camInfoMsg, const rclcpp::Time & t);
+
+  // `rosidl::Buffer` CUDA transport for the images retrieved on GPU
+  void initCudaBufferTransport();
+  void resetCudaBufferTransport();
+  void publishGpuImage(
+    const sl::Mat & img, const adaptedImagePub & ipcPubImg,
+    const image_transport::Publisher & itPubImg,
+    const std::string & imgFrameId, const rclcpp::Time & stamp);
+
   bool publishSensorsData();
   void publishImuFrameAndTopic();
   bool publishSvoStatus(uint64_t frame_ts);
@@ -138,6 +185,12 @@ protected:
   void publishImuRawMsg(const rclcpp::Time & ts_imu, const sl::SensorsData & sens_data);
 
   void publishClock(const sl::Timestamp & ts);
+  /*! \brief Get the SDK timestamp of the last grabbed frame, using the
+   * reference selected by the `general.timestamp_reference` parameter.
+   * Falls back to `TIME_REFERENCE::IMAGE` for the rest of the session if the
+   * input does not provide a per-frame exposure (the SDK then returns 0).
+   */
+  sl::Timestamp getFrameSdkTimestamp();
 
   void updateCaptureDiagnostics(diagnostic_updater::DiagnosticStatusWrapper & stat);
   void updateInputModeDiagnostics(diagnostic_updater::DiagnosticStatusWrapper & stat);
@@ -160,13 +213,15 @@ protected:
   void handleStreamingServer();
   void handleSvoRecordingStatus();
   void handleImageRetrievalAndPublishing();
+  // True if the frame just grabbed must be published, following
+  // `general.pub_frame_rate` and `general.sync_pub_to_timestamp`
+  bool isFrameToPublish();
 
   void setupSensorThreadScheduling();
   bool handleSensorThreadInterruption();
   bool waitForCameraOpen();
   bool waitForSensorSubscribers();
   bool handleSensorPublishing();
-  void adjustSensorPublishingFrequency();
 
   bool handleDynamicVideoParam(
     const rclcpp::Parameter & param, const std::string & param_name,
@@ -195,6 +250,7 @@ protected:
     diagnostic_updater::DiagnosticStatusWrapper & stat);
   void callback_pubTemp();
   void callback_pubHeartbeat();
+  void callback_clock(const rosgraph_msgs::msg::Clock::SharedPtr msg);
 
   void callback_enableStreaming(
     const std::shared_ptr<rmw_request_id_t> request_header,
@@ -208,6 +264,10 @@ protected:
     const std::shared_ptr<rmw_request_id_t> request_header,
     const std::shared_ptr<std_srvs::srv::Trigger_Request> req,
     std::shared_ptr<std_srvs::srv::Trigger_Response> res);
+  void callback_pauseSvoRec(
+    const std::shared_ptr<rmw_request_id_t> request_header,
+    const std::shared_ptr<std_srvs::srv::SetBool_Request> req,
+    std::shared_ptr<std_srvs::srv::SetBool_Response> res);
   void callback_pauseSvoInput(
     const std::shared_ptr<rmw_request_id_t> request_header,
     const std::shared_ptr<std_srvs::srv::Trigger_Request> req,
@@ -216,6 +276,10 @@ protected:
     const std::shared_ptr<rmw_request_id_t> request_header,
     const std::shared_ptr<zed_msgs::srv::SetSvoFrame_Request> req,
     std::shared_ptr<zed_msgs::srv::SetSvoFrame_Response> res);
+  void callback_reboot(
+    const std::shared_ptr<rmw_request_id_t> request_header,
+    const std::shared_ptr<std_srvs::srv::Trigger_Request> req,
+    std::shared_ptr<std_srvs::srv::Trigger_Response> res);
 
   // <---- Callbacks functions
 
@@ -235,13 +299,26 @@ private:
   std::thread _sensThread;        // Sensors data publish thread
 
   std::atomic<bool> _threadStop;
+  std::atomic<bool> _nodeDeinitialized{false};
+#ifndef FOUND_FOXY
+  rclcpp::PreShutdownCallbackHandle _preShutdownHandle;  // Removed in the destructor
+#endif
   rclcpp::TimerBase::SharedPtr _initTimer;
+  // ----> Fatal error: the node stops, the process keeps running (SDK-515)
+  std::mutex _fatalErrMutex;
+  std::atomic<bool> _fatalError{false};
+  std::atomic<bool> _fatalErrorHandled{false};
+  std::string _fatalErrReason;
+  rclcpp::TimerBase::SharedPtr _fatalErrTimer;  // Stops the node from its executor
+  // <---- Fatal error
   rclcpp::TimerBase::SharedPtr _tempPubTimer;    // Timer to retrieve and publish camera temperature
   rclcpp::TimerBase::SharedPtr _heartbeatTimer;
   // <---- Threads and Timers
 
   // ----> Thread Sync
   std::mutex _recMutex;
+  std::mutex _rebootMutex;  // Camera reboot against node shutdown
+  std::mutex _grabMutex;  // SDK calls that must not overlap grab() (e.g. SVO seek)
   // <---- Thread Sync
 
   // ----> Debug variables
@@ -252,11 +329,22 @@ private:
   bool _debugCamCtrl = false;
   bool _debugStreaming = false;
   bool _debugAdvanced = false;
+  bool _debugSim = false;
   bool _debugNitros = false;
   bool _debugTf = false;
   // If available, force disable NITROS usage for debugging and testing
   // purposes; otherwise, this is always true.
   bool _nitrosDisabled = false;
+
+  // `rosidl::Buffer` backend used to publish the images: 'cuda' (CUDA
+  // zero-copy, if available) or 'cpu'
+  std::string _bufferBackend = "cuda";
+  // True if the images are retrieved on GPU and published with CUDA-backed
+  // `rosidl::Buffer` messages
+  bool _cudaBufferActive = false;
+#ifdef FOUND_CUDA_BUFFER
+  std::unique_ptr<sl_tools::CudaBufferTransport> _cudaBuffer;
+#endif
   // <---- Debug variables
 
   // ----> QoS
@@ -284,6 +372,14 @@ private:
   image_transport::Publisher _pubColorRawImg;
   image_transport::Publisher _pubGrayImg;
   image_transport::Publisher _pubGrayRawImg;
+
+  // IPC-aware raw image publishers (zero-copy capable)
+  // Type-adapted publishers: intra-process subscribers receive StampedSlMat
+  // directly (no serialization), inter-process subscribers get auto-converted Image
+  adaptedImagePub _pubIpcColorImg;
+  adaptedImagePub _pubIpcColorRawImg;
+  adaptedImagePub _pubIpcGrayImg;
+  adaptedImagePub _pubIpcGrayRawImg;
 
 #ifdef FOUND_ISAAC_ROS_NITROS
   // Nitros image publishers with camera info
@@ -321,6 +417,11 @@ private:
   heartbeatStatusPub _pubHeartbeatStatus;
   // <---- Publishers
 
+  // ----> Subscribers
+  // Simulation clock subscriber, used when `use_sim_time` is true
+  clockSub _clockSub;
+  // <---- Subscribers
+
   // ----> Publisher variables
   bool _usingIPC = false;
   sl::Timestamp _lastTs_grab = 0;  // Used to calculate stable publish frequency
@@ -332,7 +433,6 @@ private:
 
   std::atomic<size_t> _imuSubCount;
   std::atomic<size_t> _imuRawSubCount;
-  double _sensRateComp = 1.0;
 
   sl::Mat _matColor, _matColorRaw;
   sl::Mat _matGray, _matGrayRaw;
@@ -341,21 +441,50 @@ private:
   // ----> Parameters
   std::string _cameraName = "zed_one";  // Name of the camera
   int _camGrabFrameRate = 30; // Grab frame rate
+  double _pubFrameRate = 0.0; // `general.pub_frame_rate`: 0 = grab rate
+  // `general.sync_pub_to_timestamp`: select the frames to publish on their image
+  // timestamp, so GMSL cameras capturing at the same instant publish the same
+  // captures. _lastPubBucket is the last published floor(ts / pub_period)
+  bool _syncPubToTs = false;
+  int64_t _lastPubBucket = -1;
+  double _pubDecimAccum = 1.0;  // Frame decimation: the first frame is published
   sl::RESOLUTION _camResol = sl::RESOLUTION::HD1080; // Default resolution: RESOLUTION_HD1080
   PubRes _pubResolution = PubRes::NATIVE; // Use native grab resolution by default
   double _customDownscaleFactor = 1.0;  // Used to rescale data with user factor
-  bool _cameraFlip = false; // Camera flipped?
   bool _enableHDR = false; // Enable HDR if supported?
   std::string _opencvCalibFile; // Custom OpenCV calibration file
   int _sdkVerbose = 0; // SDK verbose level
   std::string _sdkVerboseLogFile = ""; // SDK Verbose Log file
   int _gpuId = -1; // GPU ID
   bool _usePubTimestamps = false; // Use publishing timestamp instead of grab timestamp
-  bool _grabOnce = false;
-  bool _grabImuOnce = false;
+  bool _useSdkMonotonicClock = false;  // true when a monotonic clock is selected
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 53
+  // Clock source used for every SDK timestamp. Process-wide setting.
+  sl::TIMESTAMP_CLOCK _sdkTimestampClock = sl::TIMESTAMP_CLOCK::SYSTEM_CLOCK;
+  // Maximum backward host-clock step followed per sample, in ms, in
+  // SYSTEM_CLOCK mode. 4.0 is the ZED SDK default; negative disables clamping.
+  double _maxSysClockStepMs = 4.0;
+#endif
+  // Time reference used for the frame timestamps of the published data
+  sl::TIME_REFERENCE _tsReference = sl::TIME_REFERENCE::IMAGE;
+  std::atomic<bool> _grabOnce{false};     // Set by the SVO seek service
+  std::atomic<bool> _grabImuOnce{false};  // Set by the SVO seek service
 
   int _camSerialNumber = 0; // Camera serial number
   int _camId = -1; // Camera ID
+  int _camTimeoutSec = 5; // Camera timeout [sec]
+  int _maxReconnectTemp = 5; // Camera reconnection attempts
+  // On a fatal error (camera that cannot be opened or that is lost for good),
+  // stop the whole process instead of this node only: set by the launch file
+  // when the node runs alone in the container it creates
+  bool _exitOnFailure = false;
+  // A disconnected camera is waited for `_camTimeoutSec` x `_maxReconnectTemp`
+  // seconds, then the node is shut down
+  sl_tools::CameraDisconnection _camDisconn;
+  sl_tools::CameraReboot _camReboot;  // `~/reboot_camera` service calls
+  // Bus the camera is opened from when selecting it by ID. AUTO lets the ZED
+  // SDK look on every bus, which is what the serial number path already does.
+  sl::BUS_TYPE _camBusType = sl::BUS_TYPE::AUTO;
 
   sl::MODEL _camUserModel = sl::MODEL::ZED_XONE_GS;  // Default camera model
 
@@ -375,6 +504,7 @@ private:
   std::string _svoFilepath = "";
 #if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 53
   std::string _svoDecryptionKey = "";
+  std::string _svoRecEncryptionKey = "";
 #endif
   bool _svoLoop = false;
   bool _svoRealtime = false;
@@ -382,6 +512,12 @@ private:
   bool _useSvoTimestamp = false;
   bool _publishSvoClock = false;
   bool _publishStatus = true;
+
+  bool _simMode = false;     // Expecting simulation data?
+  bool _useSimTime = false;  // Use sim time?
+  std::string _simAddr =
+    "127.0.0.1";           // The local address of the machine running the simulator
+  int _simPort = 30000;    // The port to be used to connect to the simulator
 
   std::string _streamAddr = "";      // Address for local streaming input
   int _streamPort = 10000;
@@ -401,6 +537,14 @@ private:
   int _streamingServerTargetFramerate = 0;
 
   double _sensPubRate = 200.;
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 56
+  // Requested IMU configuration (ZED X family)
+  sl::IMU_SAMPLING_RATE _ImuSamplingRate = sl::IMU_SAMPLING_RATE::DEFAULT;
+  sl::ACCELEROMETER_RANGE _ImuAccelRange = sl::ACCELEROMETER_RANGE::DEFAULT;
+  sl::GYROSCOPE_RANGE _ImuGyroRange = sl::GYROSCOPE_RANGE::DEFAULT;
+#endif
+  double _imuOdr = 0.0;          // Hardware IMU output data rate [Hz] (0 = unknown)
+  double _imuDecimAccum = 0.0;   // Fractional accumulator for IMU rate decimation
   // <---- Parameters
 
   // ----> Dynamic params
@@ -426,6 +570,8 @@ private:
   int _camAutoDigitalGainRangeMin = 1;
   int _camAutoDigitalGainRangeMax = 256;
   int _camDenoising = 50;
+  int _camAEAntibanding = 1;  // 0=OFF, 1=AUTO, 2=50Hz, 3=60Hz
+  int _sceneIlluminance = -1;  // Read-only, populated from SDK getCameraSettings
   std::unordered_map<std::string, bool> _camDynParMapChanged;
   // <---- Dynamic params
 
@@ -447,12 +593,15 @@ private:
 
   // ----> Timestamps
   rclcpp::Time _frameTimestamp;
-  rclcpp::Time _lastTs_imu;
+  rclcpp::Time _lastTs_imu;      // Timestamp of the last PUBLISHED IMU sample
+  rclcpp::Time _lastSeenTs_imu;  // Timestamp of the last IMU sample READ from the SDK
+  double _imuSamplePeriod = 0.0;  // Measured interval between IMU samples [sec] (0 = not yet known)
+  rclcpp::Time _lastClock;  // Last received simulation clock value
+  // Indicates if the "/clock" topic is publishing a valid simulation time
+  std::atomic<bool> _clockAvailable;
   // <---- Timestamps
 
   // ----> TF handling
-  std::unique_ptr<tf2_ros::Buffer> _tfBuffer;
-  std::unique_ptr<tf2_ros::TransformListener> _tfListener;
   std::unique_ptr<tf2_ros::TransformBroadcaster> _tfBroadcaster;
   std::unique_ptr<tf2_ros::StaticTransformBroadcaster> _staticTfBroadcaster;
 
@@ -505,6 +654,10 @@ private:
   std::unique_ptr<sl_tools::WinAvg> _pubImuTF_sec;
   std::unique_ptr<sl_tools::WinAvg> _pubImu_sec;
   bool _imuPublishing = false;
+  // Refreshed every SENS_SUB_COUNT_REFRESH_SEC instead of on every poll of the
+  // (multi-kHz) sensors thread
+  std::chrono::steady_clock::time_point _sensSubCountLastCheck;
+  bool _sensSubCountInit = false;
   bool _videoPublishing = false;
   bool _imageSubscribed = false;
 
@@ -523,14 +676,19 @@ private:
   unsigned int _svoRecFramerate = 0;
   bool _svoRecTranscode = false;
   std::string _svoRecFilename;
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 53
+  sl::SVO_ENCODING_PRESET _svoRecEncodingPreset = sl::SVO_ENCODING_PRESET::DEFAULT;
+#endif
   // <---- SVO Recording parameters
 
   // ----> Services
   enableStreamingPtr _srvEnableStreaming;
   startSvoRecSrvPtr _srvStartSvoRec;
   stopSvoRecSrvPtr _srvStopSvoRec;
+  pauseSvoRecSrvPtr _srvPauseSvoRec;
   pauseSvoSrvPtr _srvPauseSvo;
   setSvoFramePtr _srvSetSvoFrame;
+  rebootSrvPtr _srvReboot;
 
   sl_tools::StopWatch _setSvoFrameCheckTimer;
   // <---- Services
@@ -539,8 +697,10 @@ private:
   const std::string _srvEnableStreamingName = "enable_streaming";
   const std::string _srvStartSvoRecName = "start_svo_rec";
   const std::string _srvStopSvoRecName = "stop_svo_rec";
+  const std::string _srvPauseSvoRecName = "pause_svo_rec";
   const std::string _srvToggleSvoPauseName = "toggle_svo_pause";
   const std::string _srvSetSvoFrameName = "set_svo_frame";
+  const std::string _srvRebootName = "reboot_camera";
   // <---- Services names
 };
 

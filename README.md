@@ -5,7 +5,7 @@
 
 <p align="center">
   ROS 2 packages for using Stereolabs ZED Camera cameras.<br>
-  ROS 2 Foxy Fitzroy (Ubuntu 20.04) - ROS 2 Humble Hawksbill (Ubuntu 22.04) - ROS 2 Jazzy Jalisco (Ubuntu 24.04)
+  Supported on ROS 2 Humble, Jazzy, and Lyrical (LTS), plus Foxy (backward compatibility) and Rolling (developers)
 </p>
 
 <hr>
@@ -29,13 +29,22 @@ This package enables the use of ZED cameras with ROS 2, providing access to a va
 
 ### Prerequisites
 
-- [Ubuntu 20.04 (Focal Fossa)](https://releases.ubuntu.com/focal/), [Ubuntu 22.04 (Jammy Jellyfish)](https://releases.ubuntu.com/jammy/), or [Ubuntu 24.04 (Noble Numbat)](https://releases.ubuntu.com/noble/)
-- [ZED SDK](https://www.stereolabs.com/developers/release/latest/) v5.2 (to support older versions please check the [releases](https://github.com/stereolabs/zed-ros2-wrapper/releases))
+- [Ubuntu 20.04 (Focal Fossa)](https://releases.ubuntu.com/focal/), [Ubuntu 22.04 (Jammy Jellyfish)](https://releases.ubuntu.com/jammy/), [Ubuntu 24.04 (Noble Numbat)](https://releases.ubuntu.com/noble/), or [Ubuntu 26.04 (Resolute Raccoon)](https://releases.ubuntu.com/26.04/)
+- [ZED SDK](https://www.stereolabs.com/developers/release/latest/) v5.6 (v5.0.7 or newer is supported; for older versions please check the [releases](https://github.com/stereolabs/zed-ros2-wrapper/releases))
 - [CUDA](https://developer.nvidia.com/cuda-downloads) dependency
-- ROS 2 Foxy Fitzroy (deprecated), ROS 2 Humble Hawksbill, or ROS 2 Jazzy Jalisco:
-  - [Foxy on Ubuntu 20.04](https://docs.ros.org/en/foxy/Installation/Linux-Install-Debians.html) [**Not recommended. EOL reached**]
-  - [Humble on Ubuntu 22.04](https://docs.ros.org/en/humble/Installation/Linux-Install-Debians.html) [EOL May 2027]
-  - [Jazzy Jalisco on Ubuntu 24.04](https://docs.ros.org/en/jazzy/Installation/Linux-Install-Debians.html) [EOL May 2029]
+- A supported ROS 2 distribution (see [Supported ROS 2 distributions](#supported-ros-2-distributions) below):
+  - [Humble Hawksbill on Ubuntu 22.04](https://docs.ros.org/en/humble/Installation/Linux-Install-Debians.html): LTS [EOL May 2027]
+  - [Jazzy Jalisco on Ubuntu 24.04](https://docs.ros.org/en/jazzy/Installation/Linux-Install-Debians.html): LTS [EOL May 2029]
+  - [Lyrical on Ubuntu 26.04](https://docs.ros.org/en/lyrical/Installation/Linux-Install-Debians.html): LTS
+  - [Foxy Fitzroy on Ubuntu 20.04](https://docs.ros.org/en/foxy/Installation/Linux-Install-Debians.html): backward compatibility only [EOL reached]
+  - [Rolling Ridley](https://docs.ros.org/en/rolling/Installation/Linux-Install-Debians.html), for developers
+
+### Supported ROS 2 distributions
+
+- :white_check_mark: **All the current LTS distributions are officially supported**: ROS 2 Humble Hawksbill (Ubuntu 22.04), Jazzy Jalisco (Ubuntu 24.04), and Lyrical (Ubuntu 26.04).
+- :warning: **Foxy Fitzroy** (Ubuntu 20.04) is still supported for **backward compatibility**, with limitations when newer packages are not available for it (Foxy reached its End Of Life).
+- :hammer_and_wrench: **Rolling Ridley** is supported for **developers**, but we cannot always guarantee that breaking changes introduced in Rolling are supported immediately.
+- :grey_question: **Non-LTS distributions** (e.g. Iron, Kilted) are **not officially tested**, but they could work.
 
 ### Build the package
 
@@ -94,7 +103,7 @@ To start the ZED node, open a bash terminal and use the [CLI](https://index.ros.
 ros2 launch zed_wrapper zed_camera.launch.py camera_model:=<camera_model>
 ```
 
-Replace `<camera_model>` with the model of the camera that you are using: `'zed'`, `'zedm'`, `'zed2'`, `'zed2i'`, `'zedx'`, `'zedxm'`, `'zedxhdrmini'`, `'zedxhdr'`, `'zedxhdrmax'`, `'virtual'`,`'zedxonegs'`,`'zedxone4k'`,`'zedxonehdr'`.
+Replace `<camera_model>` with the model of the camera that you are using: `'zed'`, `'zedm'`, `'zed2'`, `'zed2i'`, `'zedx'`, `'zedxm'`, `'zedxnano'`, `'zedxhdrmini'`, `'zedxhdr'`, `'zedxhdrmax'`, `'virtual'`,`'zedxonegs'`,`'zedxone4k'`,`'zedxonehdr'`.
 
 The `zed_camera.launch.py` is a Python launch script that automatically starts the ZED node using ["manual composition"](https://index.ros.org/doc/ros2/Tutorials/Composition/). The parameters for the indicated camera model are loaded from the relative "YAML files."
 A Robot State Publisher node is started to publish the camera static links and joints loaded from the URDF model associated with the camera model.
@@ -118,39 +127,113 @@ You can also quickly check that your depth data is correctly retrieved in RViz w
 
 ### Simulation mode
 
-> :pushpin: **Note:** This feature is incompatible with the ZED X One and the older first-generation ZED cameras.
+In simulation mode the node does not open a camera: it connects to a simulated ZED that streams
+images and IMU data to the ZED SDK exactly like a real camera would. The rest of the pipeline
+(depth, positional tracking, object detection, mapping, ...) runs unchanged.
+
+> :pushpin: **Note:** This feature is incompatible with the older first-generation ZED cameras.
 
 Launch a standalone ZED ROS 2 node with simulated ZED data as input by using the following command:
 
 ```bash
-ros2 launch zed_wrapper zed_camera.launch.py camera_model:=zedx sim_mode:=true
+ros2 launch zed_wrapper zed_camera.launch.py camera_model:=zedx sim_mode:=true use_sim_time:=true
+```
+
+The ZED X One monocular cameras are supported as well:
+
+```bash
+ros2 launch zed_wrapper zed_camera.launch.py camera_model:=zedxonegs sim_mode:=true use_sim_time:=true
+```
+
+Two simulated ZED X One cameras paired as a virtual stereo camera are supported too. Unlike a real
+setup, no serial number or camera ID is required because the simulator streams the already paired
+stereo images:
+
+```bash
+ros2 launch zed_wrapper zed_camera.launch.py camera_model:=virtual sim_mode:=true use_sim_time:=true
 ```
 
 Launch options:
 
-- [Mandatory] `camera_model`: indicates the model of the simulated camera. It's required that this parameter match the model of the simulated camera. In most cases, it will be a ZED X, since the first versions of the simulation plugins that we released are simulating this type of device.
 - [Mandatory] `sim_mode`: start the ZED node in simulation mode if `true`.
-- [Optional] `use_sim_time`: force the node to wait for valid messages on the topic `/clock`, and so use the simulation clock as the time reference.
-- [Optional] `sim_address`: set the address of the simulation server. The default is `127.0.0.1`, and it's valid if the node runs on the same machine as the simulator.
-- [Optional] `sim_port`: set the port of the simulation server. It must match the value of the field `Streaming Port` of the properties of the `ZED camera streamer` Action Graph node. A different `Streaming Port` value for each camera is required in multi-camera simulations.
+- [Mandatory] `camera_model`: the model of the simulated camera. It must match the model of the
+  simulated device, otherwise camera features can be silently disabled. Simulated stereo models:
+  `zedx`, `zedxm`, `zedxnano`, `zedm`, `zed2i`, `virtual`. Simulated monocular models: `zedxonegs`,
+  `zedxone4k`, `zedxonehdr`.
+- [Recommended] `use_sim_time`: force the node to wait for valid messages on the topic `/clock`, and
+  so use the simulation clock as the time reference. Required to keep the ROS 2 graph synchronized
+  with the simulation timeline.
+- [Optional] `sim_address`: the address of the simulation server. The default is `127.0.0.1`, valid
+  when the node runs on the same machine as the simulator.
+- [Optional] `sim_port`: the port of the simulation server. Default: `30000`. It must match the
+  `Streaming Port` field of the `ZED Camera Helper` (or `ZED Camera One Helper`) Action Graph node.
 
-You can also start a preconfigured instance of `rviz2` to visualize all the information available in the simulation by using the command:
+#### Resolution and framerate
+
+The streamed resolution and framerate are decided by the simulator (the `Resolution` and `FPS`
+fields of the `ZED Camera Helper` Action Graph node), not by `general.grab_resolution` and
+`general.grab_frame_rate`: the values configured in the simulator are read back from the stream and
+reported in the node log.
+
+`general.grab_frame_rate` still bounds the maximum accepted value of `general.pub_frame_rate` and
+`general.grab_compute_capping_fps`, so set it to the simulated `FPS` (the extension default is
+`30`) if you need to limit the publishing rate. Leaving `general.pub_frame_rate` at `0` publishes at
+the simulated framerate, whatever it is.
+
+#### Multi-camera simulations
+
+Each simulated camera needs its own even `Streaming Port` in the simulator (`30000`, `30002`,
+`30004`, ...). Start one node per camera with a distinct `camera_name` and the matching `sim_port`:
 
 ```bash
-ros2 launch zed_display_rviz2 display_zed_cam.launch.py camera_model:=zedx sim_mode:=true
+ros2 launch zed_wrapper zed_camera.launch.py camera_model:=zedx camera_name:=zed_front \
+  sim_mode:=true use_sim_time:=true sim_port:=30000
+ros2 launch zed_wrapper zed_camera.launch.py camera_model:=zedx camera_name:=zed_rear \
+  sim_mode:=true use_sim_time:=true sim_port:=30002
 ```
 
-The `display_zed_cam.launch.py` launch file includes the `zed_camera.launch.py` launch file, hence it gets the same parameters.
+#### What is not available in simulation
 
-Here's an example of `rviz2` running with the simulated information obtained by placing the ZED camera on a shelf of a simulated warehouse:
+Because the image source is the simulator and not a real sensor:
+
+- The camera controls (exposure, gain, white balance, etc.) are not applied.
+- The CMOS temperature is not published.
+- The barometer and the magnetometer are not simulated, so the `imu/mag` and `atm_press` topics
+  carry no data. The IMU is streamed and published normally.
+
+#### Visualization
+
+You can also start a preconfigured instance of `rviz2` to visualize all the information available in
+the simulation by using the command:
+
+```bash
+ros2 launch zed_display_rviz2 display_zed_cam.launch.py camera_model:=zedx \
+  sim_mode:=true use_sim_time:=true
+```
+
+The `display_zed_cam.launch.py` launch file includes the `zed_camera.launch.py` launch file and
+forwards `sim_mode`, `sim_address`, `sim_port` and `use_sim_time` to it.
+
+Here's an example of `rviz2` running with the simulated information obtained by placing the ZED
+camera on a shelf of a simulated warehouse:
 
 ![Sim RVIZ2](./images/sim_rviz.jpg)
 
 ![Shelves](./images/zed_shelves.jpg)
 
+#### Troubleshooting
+
+- The node retries the connection while the simulation is not streaming yet, then gives up with a
+  message reporting the configured `simulation.sim_address` / `simulation.sim_port`. Check that the
+  simulation is *playing* and that the port matches the Action Graph node.
+- With `use_sim_time:=true` the node blocks on `Waiting for a valid simulation time on the '/clock'
+  topic...` until the simulation publishes `/clock`. Add an `Isaac Read Simulation Time` node
+  feeding a `ROS2 Publish Clock` node to the Action Graph.
+- Set `debug.debug_sim: true` in the configuration file to enable the simulation debug messages.
+
 Supported simulation environments:
 
-- [NVIDIA Omniverse Isaac Sim](https://www.stereolabs.com/docs/isaac-sim/)
+- [NVIDIA Isaac Sim](https://docs.stereolabs.com/docs/integrations/isaac-sim)
 
 ## More features
 
@@ -269,11 +352,24 @@ Roll, Pitch, and the relative velocities will be fixed to zero.
 
 The ZED ROS 2 Wrapper is compatible with the [NVIDIA® Isaac ROS](https://nvidia-isaac-ros.github.io/) framework, which provides a set of tools and libraries for building robotics applications on NVIDIA® platforms.
 
-The ZED ROS 2 Wrapper leverages [NITROS](https://nvidia-isaac-ros.github.io/concepts/nitros/index.html) (NVIDIA® Isaac Transport for ROS) a technology to enable data streaming through NVIDIA-accelerated ROS graphs.
+### CUDA zero-copy transport (Isaac ROS 5, ROS 2 Lyrical)
+
+Starting with v5.6.0, on ROS 2 Lyrical and newer, the ZED ROS 2 Wrapper supports the [`rosidl::Buffer`](https://nvidia-isaac-ros.github.io/concepts/rosidl_buffer/index.html) message fields: the images, depth maps, confidence maps, and point clouds stay in GPU memory, and are shared without copies with the subscribers on the same host and GPU that accept the `cuda` buffer backend. All the other subscribers automatically receive standard CPU data, with no change on their side.
+
+The transport is enabled by default with the `general.buffer_backend` parameter (`cuda` or `cpu`), and requires:
+
+- the `cuda_buffer` package when the wrapper is built, and the `cuda_buffer_backend` plugin when the node runs
+- the `rmw_fastrtps_cpp` middleware (default), or `rmw_zenoh_cpp` v0.10.5 or newer
+
+Read the [CUDA zero-copy transport guide](https://docs.stereolabs.com/docs/integrations/isaac-ros/cuda-zero-copy/) to learn how it works, how to set it up, and how to receive the ZED data in GPU memory in your own nodes.
+
+### NITROS (Isaac ROS 3, ROS 2 Humble)
+
+With Isaac ROS 3, the ZED ROS 2 Wrapper leverages [NITROS](https://nvidia-isaac-ros.github.io/concepts/nitros/index.html) (NVIDIA® Isaac Transport for ROS), a technology to enable data streaming through NVIDIA-accelerated ROS graphs.
 
 ![NITROS communication](./images/nitros-graph.gif)
 
-Read the full [Isaac ROS integration guide](https://docs.stereolabs.com/isaac-ros/) and learn how to set up your development environment to use the ZED ROS2 Wrapper with Isaac ROS and NITROS.
+Read the full [Isaac ROS integration guide](https://docs.stereolabs.com/isaac-ros/) and learn how to set up your development environment to use the ZED ROS 2 Wrapper with Isaac ROS.
 
 ## Examples and Tutorials
 

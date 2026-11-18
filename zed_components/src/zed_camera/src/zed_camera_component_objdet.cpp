@@ -73,25 +73,30 @@ void ZedCamera::getOdParams()
       sl::OBJECT_DETECTION_MODEL::MULTI_CLASS_BOX_FAST,
       sl::OBJECT_DETECTION_MODEL::LAST, mObjDetModel))
   {
-    RCLCPP_ERROR(get_logger(), "Stopping the node.");
-    exit(EXIT_FAILURE);
+    throw sl_tools::NodeFatalError("Invalid configuration");
   }
   if (mObjDetModel == sl::OBJECT_DETECTION_MODEL::CUSTOM_BOX_OBJECTS) {
     RCLCPP_ERROR_STREAM(
       get_logger(),
       "The value of the parameter 'object_detection.detection_model' is not supported: '"
-        << sl::toString(mObjDetModel).c_str() << "'. Stopping the node");
-    exit(EXIT_FAILURE);
+        << sl::toString(mObjDetModel).c_str() << "'.");
+    throw sl_tools::NodeFatalError("Invalid configuration");
   }
   RCLCPP_INFO_STREAM(
     get_logger(), " * Object Det. model: "
       << sl::toString(mObjDetModel).c_str());
 
-  if (mObjDetModel == sl::OBJECT_DETECTION_MODEL::CUSTOM_YOLOLIKE_BOX_OBJECTS) {
-    mUsingCustomOd = true;
-  } else {
-    mUsingCustomOd = false;
-  }
+  // Every model running a user-provided ONNX file inside the ZED SDK shares the
+  // same wrapper path: custom parameters, `retrieveCustomObjects()` and raw
+  // labels. 'CUSTOM_BOX_OBJECTS' is not one of them (external inference) and is
+  // rejected above.
+  mUsingCustomOd =
+    (mObjDetModel == sl::OBJECT_DETECTION_MODEL::CUSTOM_YOLOLIKE_BOX_OBJECTS);
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 55
+  mUsingCustomOd = mUsingCustomOd ||
+    (mObjDetModel == sl::OBJECT_DETECTION_MODEL::CUSTOM_RFDETRLIKE_BOX_OBJECTS) ||
+    (mObjDetModel == sl::OBJECT_DETECTION_MODEL::CUSTOM_BOX_OBJECTS_AUTODETECT);
+#endif
   // <---- Object Detection model
 
   if (mUsingCustomOd) {
@@ -181,7 +186,7 @@ void ZedCamera::getCustomOdParams()
       get_logger(),
       "The parameter 'object_detection.custom_onnx_file' is empty. "
       "Please check the value in the YAML file.");
-    exit(EXIT_FAILURE);
+    throw sl_tools::NodeFatalError("Invalid configuration");
   }
   sl_tools::getParam(
     shared_from_this(),
@@ -231,7 +236,8 @@ void ZedCamera::getCustomOdParams()
     param_name = param_prefix + "confidence_threshold";
     sl_tools::getParam(
       shared_from_this(), param_name,
-      customOdProperties.detection_confidence_threshold, customOdProperties.detection_confidence_threshold, std::string(
+      customOdProperties.detection_confidence_threshold,
+      customOdProperties.detection_confidence_threshold, std::string(
         "  * ") + param_name + ": ", true, 0.0f, 100.0f);
     param_name = param_prefix + "is_grounded";
     sl_tools::getParam(
@@ -258,25 +264,29 @@ void ZedCamera::getCustomOdParams()
     param_name = param_prefix + "max_box_width_normalized";
     sl_tools::getParam(
       shared_from_this(), param_name,
-      customOdProperties.max_box_width_normalized, customOdProperties.max_box_width_normalized, std::string(
+      customOdProperties.max_box_width_normalized, customOdProperties.max_box_width_normalized,
+      std::string(
         "  * ") + param_name + ": ", true, -1.0f,
       1.0f);
     param_name = param_prefix + "min_box_width_normalized";
     sl_tools::getParam(
       shared_from_this(), param_name,
-      customOdProperties.min_box_width_normalized, customOdProperties.min_box_width_normalized, std::string(
+      customOdProperties.min_box_width_normalized, customOdProperties.min_box_width_normalized,
+      std::string(
         "  * ") + param_name + ": ", true, -1.0f,
       1.0f);
     param_name = param_prefix + "max_box_height_normalized";
     sl_tools::getParam(
       shared_from_this(), param_name,
-      customOdProperties.max_box_height_normalized, customOdProperties.max_box_height_normalized, std::string(
+      customOdProperties.max_box_height_normalized, customOdProperties.max_box_height_normalized,
+      std::string(
         "  * ") + param_name + ": ", true, -1.0f,
       1.0f);
     param_name = param_prefix + "min_box_height_normalized";
     sl_tools::getParam(
       shared_from_this(), param_name,
-      customOdProperties.min_box_height_normalized, customOdProperties.min_box_height_normalized, std::string(
+      customOdProperties.min_box_height_normalized, customOdProperties.min_box_height_normalized,
+      std::string(
         "  * ") + param_name + ": ", true, -1.0f,
       1.0f);
     param_name = param_prefix + "max_box_width_meters";
@@ -294,37 +304,51 @@ void ZedCamera::getCustomOdParams()
     param_name = param_prefix + "max_box_height_meters";
     sl_tools::getParam(
       shared_from_this(), param_name,
-      customOdProperties.max_box_height_meters, customOdProperties.max_box_height_meters, std::string(
+      customOdProperties.max_box_height_meters, customOdProperties.max_box_height_meters,
+      std::string(
+        "  * ") + param_name + ": ", true, -1.0f,
+      10000.0f);
+    param_name = param_prefix + "min_box_height_meters";
+    sl_tools::getParam(
+      shared_from_this(), param_name,
+      customOdProperties.min_box_height_meters, customOdProperties.min_box_height_meters,
+      std::string(
         "  * ") + param_name + ": ", true, -1.0f,
       10000.0f);
     param_name = param_prefix + "max_allowed_acceleration";
     sl_tools::getParam(
       shared_from_this(), param_name,
-      customOdProperties.max_allowed_acceleration, customOdProperties.max_allowed_acceleration, std::string(
+      customOdProperties.max_allowed_acceleration, customOdProperties.max_allowed_acceleration,
+      std::string(
         "  * ") + param_name + ": ", true, 0.0f,
       100000.0f);
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 52  // Object tracking parameters
     param_name = param_prefix + "velocity_smoothing_factor";
     sl_tools::getParam(
       shared_from_this(), param_name,
-      customOdProperties.object_tracking_parameters.velocity_smoothing_factor, customOdProperties.object_tracking_parameters.velocity_smoothing_factor, std::string(
+      customOdProperties.object_tracking_parameters.velocity_smoothing_factor,
+      customOdProperties.object_tracking_parameters.velocity_smoothing_factor, std::string(
         "  * ") + param_name + ": ", true, 0.0f,
       1.0f);
     param_name = param_prefix + "min_velocity_threshold";
     sl_tools::getParam(
       shared_from_this(), param_name,
-      customOdProperties.object_tracking_parameters.min_velocity_threshold, customOdProperties.object_tracking_parameters.min_velocity_threshold, std::string(
+      customOdProperties.object_tracking_parameters.min_velocity_threshold,
+      customOdProperties.object_tracking_parameters.min_velocity_threshold, std::string(
         "  * ") + param_name + ": ", true, 0.0f,
       100.0f);
     param_name = param_prefix + "prediction_timeout_s";
     sl_tools::getParam(
       shared_from_this(), param_name,
-      customOdProperties.object_tracking_parameters.prediction_timeout_s, customOdProperties.object_tracking_parameters.prediction_timeout_s, std::string(
+      customOdProperties.object_tracking_parameters.prediction_timeout_s,
+      customOdProperties.object_tracking_parameters.prediction_timeout_s, std::string(
         "  * ") + param_name + ": ", true, 0.0f,
       100.0f);
     param_name = param_prefix + "min_confirmation_time_s";
     sl_tools::getParam(
       shared_from_this(), param_name,
-      customOdProperties.object_tracking_parameters.min_confirmation_time_s, customOdProperties.object_tracking_parameters.min_confirmation_time_s, std::string(
+      customOdProperties.object_tracking_parameters.min_confirmation_time_s,
+      customOdProperties.object_tracking_parameters.min_confirmation_time_s, std::string(
         "  * ") + param_name + ": ", true, 0.0f,
       100.0f);
 
@@ -335,6 +359,7 @@ void ZedCamera::getCustomOdParams()
       sl::OBJECT_ACCELERATION_PRESET::LAST,
       customOdProperties.object_tracking_parameters.object_acceleration_preset,
       std::string("  * ") + param_name + ": ");
+#endif
 
     mCustomOdProperties[class_id] = customOdProperties; // Update the Custom OD Properties information
   }
@@ -851,6 +876,7 @@ bool ZedCamera::handleCustomOdDynamicParams(
       "Parameter '"
         << param.get_name() << "' correctly set to "
         << mCustomOdProperties[class_id].max_allowed_acceleration);
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 52  // Object tracking parameters
   } else if (param_name == "velocity_smoothing_factor") {
     rclcpp::ParameterType
       correctType = rclcpp::ParameterType::PARAMETER_DOUBLE;
@@ -915,6 +941,7 @@ bool ZedCamera::handleCustomOdDynamicParams(
       "Parameter '"
         << param.get_name() << "' correctly set to "
         << mCustomOdProperties[class_id].object_tracking_parameters.min_confirmation_time_s);
+#endif
   } else {
     RCLCPP_WARN_STREAM(get_logger(), "Unknown parameter: " << param.get_name());
   }
@@ -961,18 +988,30 @@ bool ZedCamera::startObjDetect()
   od_p.max_range = mObjDetMaxRange;
 
   if (mUsingCustomOd) {
-    od_p.custom_onnx_dynamic_input_shape = mYoloOnnxSize;
+    // Square input tensor: 'object_detection.custom_onnx_input_size' = 512 means
+    // 1x3x512x512. Assigning the bare int would build a Resolution(size, 0),
+    // since sl::Resolution has default arguments. The value must also match the
+    // one the model was optimized with ahead of time (sl::optimizeCustomAIModel()
+    // or 'ZED_Diagnostic -onnx'), otherwise the cached engine is not reused and
+    // the model is optimized again on the first run.
+    od_p.custom_onnx_dynamic_input_shape =
+      sl::Resolution(mYoloOnnxSize, mYoloOnnxSize);
     od_p.custom_onnx_file = mYoloOnnxPath;
   }
 
-  sl::ERROR_CODE objDetError = mZed->enableObjectDetection(od_p);
-  if (objDetError != sl::ERROR_CODE::SUCCESS) {
-    RCLCPP_ERROR_STREAM(
-      get_logger(), "Object detection error: " << sl::toString(objDetError));
+  // ----> Safe enableObjectDetection
+  {
+    std::lock_guard<std::mutex> grab_lock(mGrabMutex);
+    sl::ERROR_CODE objDetError = mZed->enableObjectDetection(od_p);
+    if (objDetError != sl::ERROR_CODE::SUCCESS) {
+      RCLCPP_ERROR_STREAM(
+        get_logger(), "Object detection error: " << sl::toString(objDetError));
 
-    mObjDetRunning = false;
-    return false;
+      mObjDetRunning = false;
+      return false;
+    }
   }
+  // <---- Safe enableObjectDetection
 
   if (!mPubObjDet) {
     mPubObjDet = create_publisher<zed_msgs::msg::ObjectsStamped>(
@@ -992,7 +1031,13 @@ void ZedCamera::stopObjDetect()
     RCLCPP_INFO(get_logger(), "=== Stopping Object Detection ===");
     mObjDetRunning = false;
     mObjDetEnabled = false;
-    mZed->disableObjectDetection();
+
+    // ----> Safe disableObjectDetection
+    {
+      std::lock_guard<std::mutex> grab_lock(mGrabMutex);
+      mZed->disableObjectDetection();
+    }
+    // <---- Safe disableObjectDetection
 
     // ----> Send an empty message to indicate that no more objects are tracked
     // (e.g clean RVIZ2)
@@ -1024,7 +1069,7 @@ void ZedCamera::processDetectedObjects(rclcpp::Time t)
 
   try {
     if (mPubObjDet) {
-      objdet_sub_count = count_subscribers(mPubObjDet->get_topic_name());
+      objdet_sub_count = mPubObjDet->get_subscription_count();
     }
   } catch (...) {
     rcutils_reset_error();
@@ -1047,7 +1092,7 @@ void ZedCamera::processDetectedObjects(rclcpp::Time t)
 
   // ----> Update runtime parameters only when changed (B2 optimization)
   if (mObjDetRtParamsDirty) {
-    if (!mUsingCustomOd || ZED_SDK_MAJOR_VERSION < 5) {
+    if (!mUsingCustomOd) {
       sl::ObjectDetectionRuntimeParameters objectTracker_parameters_rt;
       objectTracker_parameters_rt.detection_confidence_threshold = 50.0f;
       mObjDetFilter.clear();
@@ -1085,18 +1130,26 @@ void ZedCamera::processDetectedObjects(rclcpp::Time t)
       objectTracker_parameters_rt.object_class_detection_confidence_threshold = mObjDetClassConfMap;
       mZed->setObjectDetectionRuntimeParameters(objectTracker_parameters_rt);
     }
-#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 50
-    else {
-      sl::CustomObjectDetectionRuntimeParameters custom_objectTracker_parameters_rt;
-      custom_objectTracker_parameters_rt.object_class_detection_properties = mCustomOdProperties;
-      mZed->setCustomObjectDetectionRuntimeParameters(custom_objectTracker_parameters_rt);
-    }
-#endif
+    // Custom OD: do NOT call setCustomObjectDetectionRuntimeParameters here.
+    // On SDK 5.2.3 calling this corrupts internal state so that any later
+    // retrieveObjects() or retrieveCustomObjects() returns is_new=false
+    // forever, blocking /obj_det/objects publication. Verified empirically:
+    // both "set + retrieveObjects" and "set + retrieveCustomObjects(rt)"
+    // fail; only passing rt to retrieveCustomObjects() *without* a prior set
+    // call produces detections. The canonical Custom OD sample also follows
+    // this pattern (see ZED SDK samples: object detection/custom detector/
+    //   python/onnx_yolo_internal/custom_internal_detector.py).
     mObjDetRtParamsDirty = false;
   }
   // <---- Update runtime parameters only when changed
 
-  objDetRes = mZed->retrieveObjects(objects);
+  if (mUsingCustomOd) {
+    sl::CustomObjectDetectionRuntimeParameters custom_rt;
+    custom_rt.object_class_detection_properties = mCustomOdProperties;
+    objDetRes = mZed->retrieveCustomObjects(objects, custom_rt);
+  } else {
+    objDetRes = mZed->retrieveObjects(objects);
+  }
 
   if (objDetRes != sl::ERROR_CODE::SUCCESS) {
     RCLCPP_WARN_STREAM(

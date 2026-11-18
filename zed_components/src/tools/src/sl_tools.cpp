@@ -17,6 +17,9 @@
 #include <unistd.h> // getuid
 
 #include <algorithm>
+#include <atomic>
+#include <ctime>
+#include <iomanip>
 #include <sstream>
 #include <vector>
 
@@ -141,12 +144,57 @@ std::string getSDKVersion(int & major, int & minor, int & sub_minor)
   return ver;
 }
 
+namespace
+{
+std::atomic<int64_t> g_sdk_live_time_offset_ns{0};
+std::atomic<bool> g_sdk_replay_mode{false};
+}  // namespace
+
+void setSdkLiveTimeOffsetNs(int64_t offset_ns)
+{
+  g_sdk_live_time_offset_ns.store(offset_ns, std::memory_order_relaxed);
+}
+
+int64_t getSdkLiveTimeOffsetNs()
+{
+  return g_sdk_live_time_offset_ns.load(std::memory_order_relaxed);
+}
+
+void setSdkReplayMode(bool isReplay)
+{
+  g_sdk_replay_mode.store(isReplay, std::memory_order_relaxed);
+}
+
+bool getSdkReplayMode()
+{
+  return g_sdk_replay_mode.load(std::memory_order_relaxed);
+}
+
 rclcpp::Time slTime2Ros(sl::Timestamp t, rcl_clock_type_t clock_type)
 {
-  uint64_t ts_nsec = t.getNanoseconds();
-  uint32_t sec = static_cast<uint32_t>(ts_nsec / 1000000000);
-  uint32_t nsec = static_cast<uint32_t>(ts_nsec % 1000000000);
-  return rclcpp::Time(sec, nsec, clock_type);
+  const bool replay = g_sdk_replay_mode.load(std::memory_order_relaxed);
+  const int64_t offset =
+    replay ? 0 : g_sdk_live_time_offset_ns.load(std::memory_order_relaxed);
+  if (offset == 0) {
+    uint64_t ts_nsec = t.getNanoseconds();
+    uint32_t sec = static_cast<uint32_t>(ts_nsec / 1000000000);
+    uint32_t nsec = static_cast<uint32_t>(ts_nsec % 1000000000);
+    return rclcpp::Time(sec, nsec, clock_type);
+  }
+  const int64_t ts_nsec =
+    static_cast<int64_t>(t.getNanoseconds()) + offset;
+  return rclcpp::Time(ts_nsec, clock_type);
+}
+
+sl::Timestamp rosTime2Sl(const rclcpp::Time & t)
+{
+  const bool replay = g_sdk_replay_mode.load(std::memory_order_relaxed);
+  const int64_t offset =
+    replay ? 0 : g_sdk_live_time_offset_ns.load(std::memory_order_relaxed);
+  const int64_t ts_nsec = static_cast<int64_t>(t.nanoseconds()) - offset;
+  sl::Timestamp ts;
+  ts.setNanoseconds(static_cast<uint64_t>(ts_nsec < 0 ? 0 : ts_nsec));
+  return ts;
 }
 
 std::unique_ptr<sensor_msgs::msg::Image> imageToROSmsg(
@@ -674,10 +722,91 @@ bool isZEDX(sl::MODEL camModel)
   if (camModel == sl::MODEL::ZED_XM) {
     return true;
   }
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 53
+  if (camModel == sl::MODEL::ZED_X_NANO) {
+    return true;
+  }
+#endif
   if (camModel == sl::MODEL::VIRTUAL_ZED_X) {
     return true;
   }
   return false;
+}
+
+std::string cameraModelLaunchValue(sl::MODEL camModel)
+{
+  switch (camModel) {
+    case sl::MODEL::ZED: return "zed";
+    case sl::MODEL::ZED_M: return "zedm";
+    case sl::MODEL::ZED2: return "zed2";
+    case sl::MODEL::ZED2i: return "zed2i";
+    case sl::MODEL::ZED_X: return "zedx";
+    case sl::MODEL::ZED_XM: return "zedxm";
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 53
+    case sl::MODEL::ZED_X_NANO: return "zedxnano";
+#endif
+    case sl::MODEL::ZED_X_HDR: return "zedxhdr";
+    case sl::MODEL::ZED_X_HDR_MINI: return "zedxhdrmini";
+    case sl::MODEL::ZED_X_HDR_MAX: return "zedxhdrmax";
+    case sl::MODEL::VIRTUAL_ZED_X: return "virtual";
+    case sl::MODEL::ZED_XONE_GS: return "zedxonegs";
+    case sl::MODEL::ZED_XONE_UHD: return "zedxone4k";
+    case sl::MODEL::ZED_XONE_HDR: return "zedxonehdr";
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 55
+    case sl::MODEL::ZED_XONE_CORE: return "zedxonecore";
+#endif
+    default: return "";
+  }
+}
+
+bool findDeviceBySerial(
+  const std::vector<sl::DeviceProperties> & devices, int serial,
+  sl::MODEL & model)
+{
+  if (serial <= 0) {
+    return false;
+  }
+  for (const auto & dev : devices) {
+    if (dev.serial_number == static_cast<unsigned int>(serial)) {
+      model = dev.camera_model;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool isZEDXHDR(sl::MODEL camModel)
+{
+  return camModel == sl::MODEL::ZED_X_HDR ||
+         camModel == sl::MODEL::ZED_X_HDR_MINI ||
+         camModel == sl::MODEL::ZED_X_HDR_MAX;
+}
+
+bool isNeuralDepthMode(sl::DEPTH_MODE mode)
+{
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 56
+  if (mode == sl::DEPTH_MODE::NEURAL_MAX) {
+    return true;
+  }
+#endif
+  return mode == sl::DEPTH_MODE::NEURAL_LIGHT ||
+         mode == sl::DEPTH_MODE::NEURAL ||
+         mode == sl::DEPTH_MODE::NEURAL_PLUS;
+}
+
+bool isVideoSettingRejected(sl::ERROR_CODE err)
+{
+  // FAILURE: the camera refused the value (ZED SDK >= 5.6). Some cameras also
+  // return it for a setting they do not support (e.g. AE_ANTIBANDING on a ZED X
+  // Mini with JetPack 7.2). Older ZED SDK versions also return it for a
+  // transient communication error, which must be retried.
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 56
+  if (err == sl::ERROR_CODE::FAILURE) {
+    return true;
+  }
+#endif
+  return err == sl::ERROR_CODE::INVALID_FUNCTION_PARAMETERS ||
+         err == sl::ERROR_CODE::INVALID_FUNCTION_CALL;
 }
 
 bool isObjDetAvailable(sl::MODEL camModel)
@@ -726,6 +855,149 @@ double StopWatch::toc(std::string func_name)
   }
 
   return elapsed_nsec / 1e9;  // Returns elapsed time in seconds
+}
+
+bool CameraDisconnection::start()
+{
+  if (mActive) {
+    return false;
+  }
+  mStartNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+    std::chrono::steady_clock::now().time_since_epoch()).count();
+  mCount++;
+  mActive = true;
+  return true;
+}
+
+bool CameraDisconnection::stop()
+{
+  if (!mActive) {
+    return false;
+  }
+  mLastReconnSec = std::chrono::duration_cast<std::chrono::seconds>(
+    std::chrono::system_clock::now().time_since_epoch()).count();
+  mActive = false;
+  return true;
+}
+
+double CameraDisconnection::elapsedSec() const
+{
+  if (!mActive) {
+    return 0.0;
+  }
+  const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+    std::chrono::steady_clock::now().time_since_epoch()).count();
+  return static_cast<double>(now_ns - mStartNs) / 1e9;
+}
+
+std::string CameraDisconnection::lastReconnection() const
+{
+  const std::time_t t = static_cast<std::time_t>(mLastReconnSec.load());
+  if (t == 0) {
+    return std::string();
+  }
+  std::tm tm_local;
+  localtime_r(&t, &tm_local);
+  std::stringstream ss;
+  ss << std::put_time(&tm_local, "%Y-%m-%d %H:%M:%S");
+  return ss.str();
+}
+
+void CameraReboot::start()
+{
+  mStartNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+    std::chrono::steady_clock::now().time_since_epoch()).count();
+  mCount++;
+  mActive = true;
+}
+
+void CameraReboot::stop(const std::string & result)
+{
+  const std::time_t t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+  std::tm tm_local;
+  localtime_r(&t, &tm_local);
+  std::stringstream ss;
+  ss << std::put_time(&tm_local, "%Y-%m-%d %H:%M:%S") << ", " << result;
+  {
+    std::lock_guard<std::mutex> lock(mLastMutex);
+    mLast = ss.str();
+  }
+  mActive = false;
+}
+
+double CameraReboot::elapsedSec() const
+{
+  if (!mActive) {
+    return 0.0;
+  }
+  const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+    std::chrono::steady_clock::now().time_since_epoch()).count();
+  return static_cast<double>(now_ns - mStartNs) / 1e9;
+}
+
+std::string CameraReboot::last() const
+{
+  std::lock_guard<std::mutex> lock(mLastMutex);
+  return mLast;
+}
+
+void fillCamInfoDistortion(
+  const sl::CameraParameters & zed_params,
+  sensor_msgs::msg::CameraInfo & cam_info)
+{
+  // ZED SDK layout: [k1, k2, p1, p2, k3, k4, k5, k6, s1, s2, s3, s4]
+  // Radial (k1, k2, k3, k4, k5, k6), tangential (p1, p2) and prism (s1..s4)
+  // distortion. The prism terms are not used.
+  const double * disto = zed_params.disto;
+
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 54
+  const bool fisheye =
+    (zed_params.lens_distortion_model == sl::LENS_DISTORTION_MODEL::FISHEYE);
+  const bool pinhole =
+    (zed_params.lens_distortion_model == sl::LENS_DISTORTION_MODEL::PINHOLE);
+#else
+  // Before ZED SDK 5.4 the model is not reported: a fisheye calibration is the
+  // only one filling k4 while leaving the tangential terms empty.
+  const bool fisheye = (disto[5] != 0.0 && disto[2] == 0.0 && disto[3] == 0.0);
+  const bool pinhole = false;
+#endif
+
+  if (fisheye) {
+    // Kannala-Brandt: the four coefficients live at 0, 1, 4 and 5, since
+    // indices 2 and 3 hold the tangential terms this model does not use.
+    cam_info.distortion_model = sensor_msgs::distortion_models::EQUIDISTANT;
+    cam_info.d.resize(4);
+    cam_info.d[0] = disto[0];  // k1
+    cam_info.d[1] = disto[1];  // k2
+    cam_info.d[2] = disto[4];  // k3
+    cam_info.d[3] = disto[5];  // k4
+    return;
+  }
+
+  if (pinhole) {
+    // Rectified parameters: there is no distortion left to model.
+    cam_info.distortion_model = sensor_msgs::distortion_models::PLUMB_BOB;
+    cam_info.d.assign(5, 0.0);
+    return;
+  }
+
+  // Radial-tangential (Brown-Conrady). The ZED SDK order matches the OpenCV one,
+  // so the coefficients are copied as they are. The 8-coefficient model is only
+  // advertised when the higher order radial terms are actually used.
+  if (disto[5] != 0.0 || disto[6] != 0.0 || disto[7] != 0.0) {
+    cam_info.distortion_model =
+      sensor_msgs::distortion_models::RATIONAL_POLYNOMIAL;
+    cam_info.d.resize(8);
+    for (size_t i = 0; i < 8; ++i) {
+      cam_info.d[i] = disto[i];
+    }
+  } else {
+    cam_info.distortion_model = sensor_msgs::distortion_models::PLUMB_BOB;
+    cam_info.d.resize(5);
+    for (size_t i = 0; i < 5; ++i) {
+      cam_info.d[i] = disto[i];
+    }
+  }
 }
 
 }  // namespace sl_tools

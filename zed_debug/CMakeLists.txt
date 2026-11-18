@@ -15,7 +15,7 @@ if(DEFINED ENV{ROS_DISTRO})
     #message("* Found ROS2 ${FOUND_ROS2_DISTRO}")
 else()
     message("* ROS2 distro variable not set. Trying to figure it out...")
-    set(ROS2_DISTROS "ardent;bouncy;crystal;dashing;eloquent;foxy;galactic;humble;iron;jazzy;kilted;rolling")
+    set(ROS2_DISTROS "ardent;bouncy;crystal;dashing;eloquent;foxy;galactic;humble;iron;jazzy;kilted;lyrical;rolling")
     set(ROS2_FOUND FALSE)
     foreach(distro ${ROS2_DISTROS})
         if(NOT ROS2_FOUND)
@@ -36,12 +36,13 @@ if(ROS2_FOUND)
     elseif(${FOUND_ROS2_DISTRO} STREQUAL "humble")
         #message("* ROS2 ${FOUND_ROS2_DISTRO} is officially supported by this package.")
         add_definitions(-DFOUND_HUMBLE)
-    elseif(${FOUND_ROS2_DISTRO} STREQUAL "iron")
-        #message("* ROS2 ${FOUND_ROS2_DISTRO} is officially supported by this package.")
-	    add_definitions(-DFOUND_IRON)    
     elseif(${FOUND_ROS2_DISTRO} STREQUAL "jazzy")
         #message("* ROS2 ${FOUND_ROS2_DISTRO} is officially supported by this package.")
         add_definitions(-DFOUND_JAZZY)
+    elseif(${FOUND_ROS2_DISTRO} STREQUAL "lyrical")
+        add_definitions(-DFOUND_LYRICAL)
+    elseif(${FOUND_ROS2_DISTRO} STREQUAL "rolling")
+        add_definitions(-DFOUND_ROLLING)
     else()
         message("*** WARNING *** Unsupported ROS2 ${FOUND_ROS2_DISTRO}. '${PROJECT_NAME}' may not work correctly.")
     endif()
@@ -71,14 +72,29 @@ endif()
 
 #############################################
 # Dependencies
-find_package(ZED REQUIRED)
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.27")
+  cmake_policy(SET CMP0146 OLD)
+endif()
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.28")
+  cmake_policy(SET CMP0153 OLD)
+endif()
+find_package(ZED 5.0.7 REQUIRED)
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.27")
+  cmake_policy(SET CMP0146 NEW)
+endif()
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.28")
+  cmake_policy(SET CMP0153 NEW)
+endif()
 
-exec_program(uname ARGS -p OUTPUT_VARIABLE CMAKE_SYSTEM_NAME2)
+execute_process(COMMAND uname -p OUTPUT_VARIABLE CMAKE_SYSTEM_NAME2 OUTPUT_STRIP_TRAILING_WHITESPACE)
 if(CMAKE_SYSTEM_NAME2 MATCHES "aarch64") # Jetson TX
     set(CUDA_USE_STATIC_CUDA_RUNTIME OFF)
 endif()
 
-find_package(CUDA REQUIRED)
+find_package(CUDAToolkit REQUIRED)
+set(CUDA_INCLUDE_DIRS ${CUDAToolkit_INCLUDE_DIRS})
+set(CUDA_LIBRARIES CUDA::cudart)
+set(CUDA_LIBRARY_DIRS ${CUDAToolkit_LIBRARY_DIR})
 
 set(DEPENDENCIES
     rclcpp
@@ -108,6 +124,27 @@ endif()
 # a dummy_target so qtcreator have access to all files
 file(GLOB_RECURSE all_files ${CMAKE_SOURCE_DIR}/*)
 add_custom_target(all_${PROJECT_NAME}_files SOURCES ${all_files})
+
+###############################################################################
+# ament_target_dependencies() replacement: ROS 2 Lyrical's ament_cmake removed
+# that macro outright. For each dependency, link its exported modern CMake
+# target(s) (${dep}_TARGETS), falling back to the classic
+# ${dep}_INCLUDE_DIRS / ${dep}_LIBRARIES variables for dependencies that only
+# export those (e.g. backward_ros, zed_components).
+macro(zed_link_ros_dependencies target)
+  foreach(_dep ${ARGN})
+    if(${_dep}_TARGETS)
+      target_link_libraries(${target} ${${_dep}_TARGETS})
+    else()
+      if(${_dep}_INCLUDE_DIRS)
+        target_include_directories(${target} PUBLIC ${${_dep}_INCLUDE_DIRS})
+      endif()
+      if(${_dep}_LIBRARIES)
+        target_link_libraries(${target} ${${_dep}_LIBRARIES})
+      endif()
+    endif()
+  endforeach()
+endmacro()
 
 ###############################################################################
 # LIBS
@@ -143,9 +180,7 @@ target_link_directories(zed_debug_proc PUBLIC
 target_link_libraries(zed_debug_proc
     ${CUDA_LIBRARIES}
 )
-ament_target_dependencies(zed_debug_proc
-    ${DEPENDENCIES}
-)
+zed_link_ros_dependencies(zed_debug_proc ${DEPENDENCIES})
 
 # Install executable
 install(TARGETS zed_debug_proc

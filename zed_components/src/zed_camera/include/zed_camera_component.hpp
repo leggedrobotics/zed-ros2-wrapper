@@ -25,11 +25,20 @@
 
 #include "sl_version.hpp"
 #include "sl_tools.hpp"
+#include "sl_cuda_buffer.hpp"
 #include "sl_types.hpp"
 #include "visibility_control.hpp"
 
 namespace stereolabs
 {
+
+// Categorizes image topics for transport plugin filtering.
+// IMAGE: visual data from sl::VIEW (8-bit: BGRA8, BGR8, MONO8)
+// MEASURE: metric data from sl::MEASURE (float: 32FC1, or 16UC1 in OpenNI mode)
+#ifndef STEREOLABS_IMAGE_TOPIC_TYPE_DEFINED
+#define STEREOLABS_IMAGE_TOPIC_TYPE_DEFINED
+enum class ImageTopicType { IMAGE, MEASURE };
+#endif
 
 class ZedCamera : public rclcpp::Node
 {
@@ -42,7 +51,10 @@ public:
 protected:
   // ----> Initialization functions
   void initNode();
+  void initNodeImpl();
   void deInitNode();
+  void stopOnFatalError(const std::string & reason);
+  void callback_fatalError();
 
   void initParameters();
   void initServices();
@@ -81,6 +93,7 @@ protected:
 
   bool startCamera();
   bool startPosTracking();
+  bool startPosTrackingLocked();  // caller must hold mPtMutex
   bool saveAreaMemoryFile(const std::string & filePath);
   bool start3dMapping();
   void stop3dMapping();
@@ -93,6 +106,10 @@ protected:
   bool startStreamingServer();
   void stopStreamingServer();
   void closeCamera();
+  void rebootCamera(std::shared_ptr<std_srvs::srv::Trigger_Response> res);
+  bool reopenCamera();
+  bool isCameraListed() const;
+  void restoreRegionOfInterest();
   // <---- Initialization functions
 
   // ----> Dynamic Parameters Handlers
@@ -180,6 +197,10 @@ protected:
     const std::shared_ptr<rmw_request_id_t> request_header,
     const std::shared_ptr<std_srvs::srv::Trigger_Request> req,
     std::shared_ptr<std_srvs::srv::Trigger_Response> res);
+  void callback_pauseSvoRec(
+    const std::shared_ptr<rmw_request_id_t> request_header,
+    const std::shared_ptr<std_srvs::srv::SetBool_Request> req,
+    std::shared_ptr<std_srvs::srv::SetBool_Response> res);
   void callback_pauseSvoInput(
     const std::shared_ptr<rmw_request_id_t> request_header,
     const std::shared_ptr<std_srvs::srv::Trigger_Request> req,
@@ -191,12 +212,21 @@ protected:
   void callback_clickedPoint(
     const geometry_msgs::msg::PointStamped::SharedPtr msg);
   void callback_gnssFix(const sensor_msgs::msg::NavSatFix::SharedPtr msg);
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 56
+  void callback_motionPrior(const nav_msgs::msg::Odometry::SharedPtr msg);
+  void getMotionPriorParams();
+  void publishMotionPriorLinks();
+#endif
   void callback_clock(const rosgraph_msgs::msg::Clock::SharedPtr msg);
   void callback_setRoi(
     const std::shared_ptr<rmw_request_id_t> request_header,
     const std::shared_ptr<zed_msgs::srv::SetROI_Request> req,
     std::shared_ptr<zed_msgs::srv::SetROI_Response> res);
   void callback_resetRoi(
+    const std::shared_ptr<rmw_request_id_t> request_header,
+    const std::shared_ptr<std_srvs::srv::Trigger_Request> req,
+    std::shared_ptr<std_srvs::srv::Trigger_Response> res);
+  void callback_reboot(
     const std::shared_ptr<rmw_request_id_t> request_header,
     const std::shared_ptr<std_srvs::srv::Trigger_Request> req,
     std::shared_ptr<std_srvs::srv::Trigger_Response> res);
@@ -239,6 +269,18 @@ protected:
     const std::string & imgFrameId,
     const rclcpp::Time & t);
 
+  // IPC-aware overload: publishes zero-copy via TypeAdapter rclcpp::Publisher
+  // and compressed via image_transport when compression subscribers exist
+  void publishImageWithInfo(
+    const sl::Mat & img,
+    const adaptedImagePub & ipcPubImg,
+    const image_transport::Publisher & itPubImg,
+    const camInfoPub & infoPub,
+    const camInfoPub & infoPubTrans,
+    camInfoMsgPtr & camInfoMsg,
+    const std::string & imgFrameId,
+    const rclcpp::Time & t);
+
 #ifdef FOUND_ISAAC_ROS_NITROS
   void publishImageWithInfo(
     const sl::Mat & img,
@@ -253,8 +295,28 @@ protected:
     const camInfoPub & infoPub,
     camInfoMsgPtr & camInfoMsg, const rclcpp::Time & t);
 
+  // `rosidl::Buffer` CUDA transport for the data retrieved on GPU
+  void initCudaBufferTransport();
+  void resetCudaBufferTransport();
+  // CUDA stream for the retrieve functions of the ZED SDK
+  cudaStream_t getRetrieveStream(bool gpu) const;
+  bool publishCudaImage(
+    const sl::Mat & img, const adaptedImagePub & pubImg,
+    const std::string & imgFrameId, const rclcpp::Time & stamp);
+  void publishGpuImage(
+    const sl::Mat & img, const adaptedImagePub & ipcPubImg,
+    const image_transport::Publisher & itPubImg,
+    const std::string & imgFrameId, const rclcpp::Time & stamp);
+  void publishGpuStereoImages(
+    const sl::Mat & left, const sl::Mat & right,
+    const adaptedImagePub & ipcPubImg, const image_transport::Publisher & itPubImg,
+    const rclcpp::Time & t);
+  bool downloadGpuMat(const sl::Mat & gpu, sl::Mat & cpu);
+  void publishGpuPointCloud(const rclcpp::Time & stamp);
+  void publishCpuPointCloud(const rclcpp::Time & stamp);
+
   void publishDepthMapWithInfo(const sl::Mat & depth, const rclcpp::Time & t);
-  void publishDisparity(const sl::Mat & disparity, const rclcpp::Time & t);
+  void publishDisparityMap(const sl::Mat & disparity, const rclcpp::Time & t);
 
   void processVideoDepth();
   bool updateVideoDepthSubscribers(bool force = false);
@@ -269,8 +331,9 @@ protected:
   bool retrieveRightGrayImage(bool gpu);
   bool retrieveRightRawGrayImage(bool gpu);
   bool retrieveDepthMap(bool gpu);
+  bool retrieveDepthImage(bool gpu);
   bool retrieveConfidence(bool gpu);
-  bool retrieveDisparity();
+  bool retrieveDisparityMap();
   bool retrieveDepthInfo();
 
   void publishVideoDepth(rclcpp::Time & out_pub_ts);
@@ -285,8 +348,9 @@ protected:
   void publishStereoImages(const rclcpp::Time & t);
   void publishStereoRawImages(const rclcpp::Time & t);
   void publishDepthImage(const rclcpp::Time & t);
+  void publishDepthColorImage(const rclcpp::Time & t);
   void publishConfidenceMap(const rclcpp::Time & t);
-  void publishDisparityImage(const rclcpp::Time & t);
+  void publishDisparity(const rclcpp::Time & t);
   void publishDepthInfo(const rclcpp::Time & t);
   void publishCameraInfos(); // Used to publish camera infos when no video/depth is subscribed
 
@@ -295,8 +359,12 @@ protected:
 
   void processPointCloud();
   bool isPointCloudSubscribed();
+  // Configures the reusable point cloud message (fields/size) for the given
+  // resolution. Returns true if the buffer was (re)allocated this call.
+  bool prepareCloudMsg(size_t width, size_t height);
   void publishPointCloud();
   void publishImuFrameAndTopic();
+  bool areSensorsDataNeeded() const;
 
   void publishOdom(
     tf2::Transform & odom2baseTransf, sl::Pose & slPose, const tf2::Vector3 & linear_velocity,
@@ -313,18 +381,56 @@ protected:
   void publishOdomTF(rclcpp::Time t);
   void publishPoseTF(rclcpp::Time t);
   bool publishSensorsData(rclcpp::Time force_ts = TIMEZERO_ROS);
+  // True (and logged once) if `err` means that the input cannot provide the
+  // sensors data for the whole session
+  bool isSensorsDataUnavailable(sl::ERROR_CODE err);
+  void publishImuMessages(
+    const sl::SensorsData & sens_data, const rclcpp::Time & ts_imu,
+    size_t imu_SubCount, size_t imu_RawSubCount);
+  void publishBaroMessage(
+    const sl::SensorsData & sens_data, const rclcpp::Time & ts_baro,
+    size_t pressSubCount);
+  void publishMagMessage(
+    const sl::SensorsData & sens_data, const rclcpp::Time & ts_mag,
+    size_t imu_MagSubCount);
   void publishHealthStatus();
+  /*! \brief Read the camera health status and cache it, so that both the
+   * health status topic and the diagnostic updater use the same values
+   * without querying the SDK from two different threads.
+   */
+  void readHealthStatus();
   bool publishSvoStatus(uint64_t frame_ts);
 
   void publishClock(const sl::Timestamp & ts);
+  /*! \brief Get the SDK timestamp of the last grabbed frame, using the
+   * reference selected by the `general.timestamp_reference` parameter.
+   * Falls back to `TIME_REFERENCE::IMAGE` for the rest of the session if the
+   * input does not provide a per-frame exposure (the SDK then returns 0).
+   */
+  sl::Timestamp getFrameSdkTimestamp();
   // <---- Publishing functions
 
   // ----> Utility functions
   bool isDepthRequired();
+  // Synchronized publishing selects the frames only when it publishes fewer
+  // frames than it grabs
+  bool isSyncPubGated() const
+  {
+    return mSyncPubToTs && mVdPubRate > 0.0 && mVdPubRate < mCamGrabFrameRate;
+  }
   bool updatePosTrackingSubscribers(bool force = false);
   bool isPosTrackingRequired();
 
   void applyVideoSettings();
+  // Robustly enforce a single integer video setting on the camera.
+  // Writes `value` when the current value cannot be read (read error) or
+  // differs from `value`. Returns false if the write failed, so the caller
+  // can keep the settings "dirty" and retry on a later cycle.
+  bool applyVideoSetting(sl::VIDEO_SETTINGS setting, int value);
+  // Reports a failed video setting. Returns true if retrying cannot help (the
+  // setting or its value is refused by the camera or the input): it is then
+  // reported once per apply cycle and not retried.
+  bool checkVideoSettingError(sl::VIDEO_SETTINGS setting, sl::ERROR_CODE err);
   void applyAutoExposureGainSettings();
   void applyExposureGainSettings();
   void applyWhiteBalanceSettings();
@@ -338,10 +444,15 @@ protected:
   void applyZEDXAutoAnalogGainRange();
   void applyZEDXAutoDigitalGainRange();
   void applyZEDXDenoising();
+  void applyZEDXAEAntibanding();
+  void readSceneIlluminance();
 
   void applyDepthSettings();
 
   void processOdometry();
+  // True when the last pose can be used: the visual-inertial odometry tracked the
+  // frame, or the pose followed the motion prior because the images could not be used
+  bool isTrackedPoseValid() const;
   void processPose();
   void processGeoPose();
   void processSvoGnssData();
@@ -353,6 +464,9 @@ protected:
 
   bool setPose(float xt, float yt, float zt, float rr, float pr, float yr);
   void initTransforms();
+  const std::string & poseFrameId() const;
+  void selectPoseFrame(bool keepOdometry);
+  void updateStaticTransforms();
   bool getSens2BaseTransform();
   bool getSens2CameraTransform();
   bool getCamera2BaseTransform();
@@ -408,8 +522,11 @@ private:
   std::string mRgbRawGrayTopic;
 
   // Depth Topics
-  std::string mDisparityTopic;
+  std::string mDisparityTopic; // Obbsolete
+  std::string mDispMapTopic;
+  std::string mDispImgTopic;
   std::string mDepthTopic;
+  std::string mDepthImageTopic;
   std::string mDepthInfoTopic;
   std::string mConfMapTopic;
   std::string mPointcloudTopic;
@@ -459,6 +576,16 @@ private:
   // purposes; otherwise, this is always true.
   bool _nitrosDisabled = true;
 
+  // `rosidl::Buffer` backend used to publish the images, depth maps and point
+  // clouds: 'cuda' (CUDA zero-copy, if available) or 'cpu'
+  std::string mBufferBackend = "cuda";
+  // True if the data are retrieved on GPU and published with CUDA-backed
+  // `rosidl::Buffer` messages
+  bool mCudaBufferActive = false;
+#ifdef FOUND_CUDA_BUFFER
+  std::unique_ptr<sl_tools::CudaBufferTransport> mCudaBuffer;
+#endif
+
   // Topic Enablers
 #if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 51
   bool m24bitMode = false;
@@ -480,6 +607,7 @@ private:
   bool mPublishPath = false;
   bool mPublishDetPlane = false;
   bool mPublishDepthMap = true;
+  bool mPublishDepthImage = false;
   bool mPublishDepthInfo = false;
   bool mPublishPointcloud = true;
   bool mPublishConfidence = false;
@@ -514,6 +642,7 @@ private:
   std::string mSvoFilepath = "";
 #if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 53
   std::string mSvoDecryptionKey = "";
+  std::string mSvoRecEncryptionKey = "";
 #endif
   bool mSvoLoop = false;
   bool mSvoRealtime = false;
@@ -522,6 +651,16 @@ private:
   double mSvoExpectedPeriod = 0.0;
   bool mUseSvoTimestamp = false;
   bool mUsePubTimestamps = false;
+  bool mUseSdkMonotonicClock = false;  // true when a monotonic clock is selected
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 53
+  // Clock source used for every SDK timestamp. Process-wide setting.
+  sl::TIMESTAMP_CLOCK mSdkTimestampClock = sl::TIMESTAMP_CLOCK::SYSTEM_CLOCK;
+  // Maximum backward host-clock step followed per sample, in ms, in
+  // SYSTEM_CLOCK mode. 4.0 is the ZED SDK default; negative disables clamping.
+  double mMaxSysClockStepMs = 4.0;
+#endif
+  // Time reference used for the frame timestamps of the published data
+  sl::TIME_REFERENCE mTsReference = sl::TIME_REFERENCE::IMAGE;
   bool mGrabOnce = false;
   bool mGrabImuOnce = false;
   int mVerbose = 1;
@@ -538,22 +677,68 @@ private:
   double mCamMaxDepth = 15.0;
   sl::DEPTH_MODE mDepthMode = sl::DEPTH_MODE::NEURAL;
   std::string mDepthModelOverride;  // Optional model file override for depth mode
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 55
+  sl::DEPTH_PRECISION mDepthPrecision = sl::DEPTH_PRECISION::FP16;
+  bool mAllowDepthCudaGraph = false;
+#endif
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 56
+  sl::DEPTH_COMPUTE_DEVICE mDepthComputeDevice = sl::DEPTH_COMPUTE_DEVICE::AUTO;  // Requested
+  sl::DEPTH_COMPUTE_DEVICE mDepthComputeDeviceInUse = sl::DEPTH_COMPUTE_DEVICE::AUTO;  // After open
+#endif
   PcRes mPcResolution = PcRes::COMPACT;
+  bool mVoxelPointCloud = false;
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 53
+  sl::VoxelMeasureParameters mVoxelParams;
+#endif
   std::atomic<bool> mDepthDisabled = false;  // Indicates if depth calculation is not required (DEPTH_MODE::NONE)
   int mDepthStabilization = 0;
 
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 56
+  // ----> Motion prior (`pos_tracking.motion_prior.*`)
+  bool mMotionPriorEnabled = false;
+  std::string mMotionPriorTopic = "/odometry/wheel";
+  sl::POSE_AXIS mMotionPriorAxes = sl::POSE_AXIS::TX | sl::POSE_AXIS::TY | sl::POSE_AXIS::RZ;
+  double mMotionPriorRejThresh = 3.0;
+  double mMotionPriorTransStdPerM = 0.02;  // Fallback when the twist covariance is not set
+  double mMotionPriorRotStdPerRad = 0.02;
+  bool mMotionPriorHasPrev = false;  // A previous sample starts the next interval
+  tf2::Transform mMotionPriorPrevPose;
+  rclcpp::Time mMotionPriorPrevStamp;
+  bool mMotionPriorTfOk = false;  // Mounting of the source, read once from TF
+  sl::Transform mMotionPriorSensorTransf;
+  // <---- Motion prior
+#endif
   int mCamTimeoutSec = 5;
   int mMaxReconnectTemp = 5;
+  // On a fatal error (camera that cannot be opened or that is lost for good),
+  // stop the whole process instead of this node only: set by the launch file
+  // when the node runs alone in the container it creates
+  bool mExitOnFailure = false;
+  // A disconnected camera is waited for `mCamTimeoutSec` x `mMaxReconnectTemp`
+  // seconds, then the node is shut down
+  sl_tools::CameraDisconnection mCamDisconn;
+  sl_tools::CameraReboot mCamReboot;  // `~/reboot_camera` service calls
   bool mCameraSelfCalib = true;
   bool mCameraFlip = false;
 
 
   bool mSensCameraSync = false;
   double mSensPubRate = 200.;
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 56
+  // Requested IMU configuration (ZED X family)
+  sl::IMU_SAMPLING_RATE mImuSamplingRate = sl::IMU_SAMPLING_RATE::DEFAULT;
+  sl::ACCELEROMETER_RANGE mImuAccelRange = sl::ACCELEROMETER_RANGE::DEFAULT;
+  sl::GYROSCOPE_RANGE mImuGyroRange = sl::GYROSCOPE_RANGE::DEFAULT;
+#endif
+  double mImuOdr = 0.0;          // Hardware IMU output data rate [Hz] (0 = unknown)
+  double mImuDecimAccum = 0.0;   // Fractional accumulator for IMU rate decimation
 
   std::vector<std::vector<float>> mRoyPolyParam;  // Manual ROI polygon
   bool mAutoRoiEnabled = false;
   bool mManualRoiEnabled = false;
+  // Manual ROI in use, applied again when the camera is reopened after a reboot
+  sl::Mat mManualRoiMask;
+  std::unordered_set<sl::MODULE> mManualRoiModules;
   float mRoiDepthFarThresh = 2.5f;
   float mRoiImgHeightRationCutOff = 0.5f;
   std::unordered_set<sl::MODULE> mRoiModules;
@@ -568,6 +753,9 @@ private:
   bool mLocalizationOnly = false;
   sl::POSITIONAL_TRACKING_MODE mPosTrkMode =
     sl::POSITIONAL_TRACKING_MODE::GEN_1;
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 55
+  sl::COMPUTE_PREFERENCE mPosTrkComputePref = sl::COMPUTE_PREFERENCE::AUTO;
+#endif
   bool mSaveAreaMemoryOnClosing = true;
   bool mImuFusion = true;
   bool mFloorAlignment = false;
@@ -638,7 +826,11 @@ private:
   bool mBodyTrkEnabled = false;
   sl::BODY_TRACKING_MODEL mBodyTrkModel =
     sl::BODY_TRACKING_MODEL::HUMAN_BODY_FAST;
-  sl::BODY_FORMAT mBodyTrkFmt = sl::BODY_FORMAT::BODY_38;
+  sl::BODY_FORMAT mBodyTrkFmt = sl::BODY_FORMAT::BODY_34;
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 55
+  sl::BODY_TRACKING_MODEL_GEN mBodyTrkModelGen =
+    sl::BODY_TRACKING_MODEL_GEN::GEN_2;
+#endif
   bool mBodyTrkReducedPrecision = false;
   double mBodyTrkMaxRange = 15.0f;
   sl::BODY_KEYPOINTS_SELECTION mBodyTrkKpSelection =
@@ -673,6 +865,19 @@ private:
   OnSetParametersCallbackHandle::SharedPtr mParamChangeCallbackHandle;
 
   double mVdPubRate = 15.0;
+  // `general.pub_frame_rate` <= 0 means "publish at the grab rate": the real
+  // grab rate is known only after the input is open, so the request is stored
+  // here and re-applied in `processCameraInformation()`.
+  bool mVdPubRateAuto = false;
+  // `general.sync_pub_to_timestamp`: decimate publishing on the image
+  // timestamp instead of the free-running throttles (SDK grab compute cap and
+  // publish-thread sleeps), so multiple GMSL-synced cameras select the same
+  // grabbed frame and publish in phase. mLastPubBucket is the last emitted
+  // floor(ts / pub_period) bucket (shared by video/depth and point cloud).
+  bool mSyncPubToTs = false;
+  int64_t mLastPubBucket = -1;
+  int64_t mLastGrabTsNs = 0;          // previous grab timestamp (predictive depth gating)
+  bool mForceDepthNextFrame = false;  // force depth after startup / a deferred window
   int mCamBrightness = 4;
   int mCamContrast = 4;
   int mCamHue = 0;
@@ -690,17 +895,31 @@ private:
   double mFusedPcPubRate = 1.0;
   bool mRemoveSatAreas = true;
 
-  int mGmslExpTime = 16666;
+  int mGmslExpTime = 16000;
   int mGmslAutoExpTimeRangeMin = 28;
   int mGmslAutoExpTimeRangeMax = 30000;
   int mGmslExposureComp = 50;
-  int mGmslAnalogGain = 8000;
+  int mGmslAnalogGain = 1255;
   int mGmslAnalogGainRangeMin = 1000;
   int mGmslAnalogGainRangeMax = 16000;
-  int mGmslDigitalGain = 128;
+  int mGmslDigitalGain = 1;
   int mGmslAutoDigitalGainRangeMin = 1;
   int mGmslAutoDigitalGainRangeMax = 256;
   int mGmslDenoising = 50;
+  int mGmslAEAntibanding = 1;  // 0=OFF, 1=AUTO, 2=50Hz, 3=60Hz
+  // Read-only, populated from SDK getCameraSettings by the grab thread and read
+  // by the diagnostic updater thread
+  std::atomic<int> mSceneIlluminance{-1};
+  // Camera health status, populated from the SDK by the grab thread and read by
+  // the diagnostic updater thread. All false when the health checks are disabled
+  // with 'general.enable_image_validity_check'.
+  std::atomic<bool> mHealthLowImageQuality{false};
+  std::atomic<bool> mHealthLowLighting{false};
+  std::atomic<bool> mHealthLowDepthReliability{false};
+  std::atomic<bool> mHealthLowMotionSensReliability{false};
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 55
+  std::atomic<bool> mHealthDuplicatedImage{false};
+#endif
   // <---- Dynamic params
 
   // ----> QoS
@@ -762,6 +981,10 @@ private:
     mMap2OdomTransf;    // Coordinates of the odometry frame in map frame
   tf2::Transform mOdom2BaseTransf;  // Coordinates of the base in odometry frame
   tf2::Transform mMap2BaseTransf;   // Coordinates of the base in map frame
+  // Last valid poses before a camera reboot: the positional tracking restarts from them
+  bool mRebootPoseRestore = false;
+  tf2::Transform mRebootOdom2BaseTransf;
+  tf2::Transform mRebootMap2BaseTransf;
   tf2::Transform
     mSensor2BaseTransf;    // Coordinates of the base frame in sensor frame
   tf2::Vector3 linear_base; // Linear twist in the camera base link frame
@@ -782,6 +1005,15 @@ private:
   bool mSensor2CameraTransfFirstErr = true;
   bool mCamera2BaseTransfValid = false;
   bool mCamera2BaseFirstErr = true;
+  // The wait for the static transforms expired once: do not wait again
+  bool mStaticTfWaitExpired = false;
+  // Frame the pose, the odometry and the TF are referred to: the base frame,
+  // or the camera center (the left camera frame until that one is known) while
+  // the static transform to the base frame is missing
+  enum class PoseFrame {BASE, CENTER, SENSOR};
+  PoseFrame mPoseFrame = PoseFrame::BASE;
+  tf2::Transform mSensor2PoseTransf = tf2::Transform::getIdentity();
+  std::chrono::steady_clock::time_point mLastStaticTfCheck;
   bool mGnss2BaseTransfValid = false;
   bool mGnss2BaseTransfFirstErr = true;
   bool mMap2UtmTransfValid = false;
@@ -815,7 +1047,31 @@ private:
   image_transport::Publisher mPubRawRightGray;
   image_transport::Publisher mPubRoiMask;
   image_transport::Publisher mPubDepth;
+  image_transport::Publisher mPubDepthImage;
   image_transport::Publisher mPubConfMap;
+
+  // IPC-aware image publishers (zero-copy capable via TypeAdapter)
+  // Intra-process subscribers receive StampedSlMat directly (no serialization),
+  // inter-process subscribers get auto-converted sensor_msgs::msg::Image
+  adaptedImagePub mPubIpcRgb;
+  adaptedImagePub mPubIpcRawRgb;
+  adaptedImagePub mPubIpcLeft;
+  adaptedImagePub mPubIpcRawLeft;
+  adaptedImagePub mPubIpcRight;
+  adaptedImagePub mPubIpcRawRight;
+  adaptedImagePub mPubIpcRgbGray;
+  adaptedImagePub mPubIpcRawRgbGray;
+  adaptedImagePub mPubIpcLeftGray;
+  adaptedImagePub mPubIpcRawLeftGray;
+  adaptedImagePub mPubIpcRightGray;
+  adaptedImagePub mPubIpcRawRightGray;
+  adaptedImagePub mPubIpcRoiMask;
+  adaptedImagePub mPubIpcDepth;
+  adaptedImagePub mPubIpcDepthImage;
+  adaptedImagePub mPubIpcConfMap;
+  adaptedImagePub mPubIpcStereo;
+  adaptedImagePub mPubIpcRawStereo;
+
 #ifdef FOUND_ISAAC_ROS_NITROS
   // Nitros image publishers with camera info
   nitrosImgPub mNitrosPubRgb;
@@ -832,7 +1088,9 @@ private:
   nitrosImgPub mNitrosPubRawRightGray;
   nitrosImgPub mNitrosPubRoiMask;
   nitrosImgPub mNitrosPubDepth;
+  nitrosImgPub mNitrosPubDepthImage;
   nitrosImgPub mNitrosPubConfMap;
+  nitrosImgPub mNitrosPubDispImg;
 #endif
 
   // Image publishers without camera info (no NITROS)
@@ -854,7 +1112,9 @@ private:
   camInfoPub mPubRawRightGrayCamInfo;
   camInfoPub mPubRoiMaskCamInfo;
   camInfoPub mPubDepthCamInfo;
+  camInfoPub mPubDepthImageCamInfo;
   camInfoPub mPubConfMapCamInfo;
+  camInfoPub mPubDispImgCamInfo;
   camInfoPub mPubRgbCamInfoTrans;
   camInfoPub mPubRawRgbCamInfoTrans;
   camInfoPub mPubLeftCamInfoTrans;
@@ -869,7 +1129,9 @@ private:
   camInfoPub mPubRawRightGrayCamInfoTrans;
   camInfoPub mPubRoiMaskCamInfoTrans;
   camInfoPub mPubDepthCamInfoTrans;
+  camInfoPub mPubDepthImageCamInfoTrans;
   camInfoPub mPubConfMapCamInfoTrans;
+  camInfoPub mPubDispImgCamInfoTrans;
 
 #ifdef FOUND_POINT_CLOUD_TRANSPORT
   point_cloud_transport::Publisher mPubCloud;
@@ -884,7 +1146,13 @@ private:
   svoStatusPub mPubSvoStatus;
   healthStatusPub mPubHealthStatus;
   heartbeatStatusPub mPubHeartbeatStatus;
-  disparityPub mPubDisparity;
+
+  disparityPub mPubDisparity; // Obsolete
+  disparityPub mPubDispMap; // Disparity Map
+  image_transport::Publisher mPubDispImg; // Disparity Image
+  adaptedImagePub mPubIpcDispImg; // Disparity Image for IPC
+
+
   posePub mPubPose;
   poseStatusPub mPubPoseStatus;
   poseCovPub mPubPoseCov;
@@ -931,8 +1199,11 @@ private:
   size_t mStereoSubCount = 0;
   size_t mStereoRawSubCount = 0;
   size_t mDepthSubCount = 0;
+  size_t mDepthImageSubCount = 0;
   size_t mConfMapSubCount = 0;
-  size_t mDisparitySubCount = 0;
+  size_t mDisparitySubCount = 0; // Obsolete
+  size_t mDispMapSubCount = 0;
+  size_t mDispImgSubCount = 0;
   size_t mDepthInfoSubCount = 0;
   size_t mPcSubCount = 0;
   std::chrono::steady_clock::time_point mLastVideoDepthSubCountQuery;
@@ -945,7 +1216,7 @@ private:
   sl::Mat mMatRight, mMatRightRaw;
   sl::Mat mMatLeftGray, mMatLeftRawGray;
   sl::Mat mMatRightGray, mMatRightRawGray;
-  sl::Mat mMatDepth, mMatDisp, mMatConf;
+  sl::Mat mMatDepth, mMatDepthImage, mMatDispMap, mMatDispImg, mMatConf;
 
   float mMinDepth = 0.0f;
   float mMaxDepth = 0.0f;
@@ -960,6 +1231,11 @@ private:
   // ----> Subscribers
   clickedPtSub mClickedPtSub;
   gnssFixSub mGnssFixSub;
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 56
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr mMotionPriorSub;
+  markerPub mPubMotionPriorLinks;
+  int mFrameSkipCountMpLinks = 0;
+#endif
   clockSub mClockSub;
   // <---- Subscribers
 
@@ -973,17 +1249,27 @@ private:
   std::thread mSensThread;        // Sensors data publish thread
   std::atomic<bool> mThreadStop;
   std::atomic<bool> mNodeDeinitialized;
+#ifndef FOUND_FOXY
+  rclcpp::PreShutdownCallbackHandle mPreShutdownHandle;  // Removed in the destructor
+#endif
   rclcpp::TimerBase::SharedPtr mInitTimer;
+  // ----> Fatal error: the node stops, the process keeps running (SDK-515)
+  std::mutex mFatalErrMutex;
+  std::atomic<bool> mFatalError{false};
+  std::atomic<bool> mFatalErrorHandled{false};
+  std::string mFatalErrReason;
+  rclcpp::TimerBase::SharedPtr mFatalErrTimer;  // Stops the node from its executor
+  // <---- Fatal error
   rclcpp::TimerBase::SharedPtr mPathTimer;
   rclcpp::TimerBase::SharedPtr mFusedPcTimer;
   rclcpp::TimerBase::SharedPtr
     mTempPubTimer;    // Timer to retrieve and publish CMOS temperatures
   rclcpp::TimerBase::SharedPtr mGnssPubCheckTimer;
   rclcpp::TimerBase::SharedPtr mHeartbeatTimer;
-  double mSensRateComp = 1.0;
   // <---- Threads and Timers
 
   // ----> Thread Sync
+  std::mutex mGrabMutex;
   std::mutex mRecMutex;
   std::mutex mDynParMutex;
   std::mutex mMappingMutex;
@@ -991,6 +1277,7 @@ private:
   std::mutex mBodyTrkMutex;
   std::mutex mPcMutex;
   std::mutex mCloseCameraMutex;
+  std::mutex mRebootMutex;  // Camera reboot against node shutdown
   std::mutex mPtMutex;
   std::condition_variable mPcDataReadyCondVar;
   std::atomic_bool mPcDataReady;
@@ -1006,6 +1293,7 @@ private:
   int mSvoFrameId = 0;
   int mSvoFrameCount = 0;
   bool mPosTrackingStarted = false;
+  int mPosTrkStartErrCount = 0;  // Consecutive positional tracking start failures
   std::atomic_bool mPoseLocked = false;
   std::atomic<uint64_t> mPoseLockCount{0};
   bool mVdPublishing = false;  // Indicates if video and depth data are
@@ -1015,21 +1303,30 @@ private:
   bool mTriggerAutoExpGain = true;  // Triggered on start
   bool mTriggerAutoWB = true;       // Triggered on start
   bool mCamSettingsDirty = true;    // Force initial apply on start
+  bool mVideoSettingsApplyOk = true;  // Set false when a video setting could
+                                      // not be applied, so that the apply is
+                                      // retried instead of being lost
+  int mVideoSettingsRetryCount = 0;   // Bounded retries of a failing apply
+  static const int mVideoSettingsMaxRetries = 20;  // ~ first seconds of stream
+  std::unordered_set<sl::VIDEO_SETTINGS> mVideoSettingsRejected;  // Reported once per apply cycle
   bool mRecording = false;
+  int mSvoRecErrCount = 0;  // Consecutive SVO frame recording errors
   sl::RecordingStatus mRecStatus = sl::RecordingStatus();
   bool mPosTrackingReady = false;
 
   sl::FusedPositionalTrackingStatus mFusedPosTrackingStatus;
   sl::PositionalTrackingStatus mPosTrackingStatus;
+  sl::POSITIONAL_TRACKING_STATE mPosTrackingState =
+    sl::POSITIONAL_TRACKING_STATE::OFF;
 
   sl::REGION_OF_INTEREST_AUTO_DETECTION_STATE mAutoRoiStatus =
     sl::REGION_OF_INTEREST_AUTO_DETECTION_STATE::NOT_ENABLED;
 
   bool mAreaFileExists = false;
   bool mResetOdomFromSrv = false;
-  bool mSpatialMappingRunning = false;
-  bool mObjDetRunning = false;
-  bool mBodyTrkRunning = false;
+  std::atomic<bool> mSpatialMappingRunning{false};
+  std::atomic<bool> mObjDetRunning{false};
+  std::atomic<bool> mBodyTrkRunning{false};
   bool mRgbSubscribed = false;
   bool mGnssMsgReceived = false;  // Indicates if a NavSatFix topic has been
                                   // received, also with invalid position fix
@@ -1048,7 +1345,9 @@ private:
 
   // ----> Positional Tracking
   sl::Pose mLastZedPose;
-  sl::Pose mLastZedDeltaOdom;
+  // Confidence of the last pose [0,100], cached by the grab thread and read by
+  // the diagnostic updater thread. -1 while no pose has been retrieved yet.
+  std::atomic<int> mPoseConfidence{-1};
   sl::Transform mInitialPoseSl;
   std::vector<geometry_msgs::msg::PoseStamped> mOdomPath;
   std::vector<geometry_msgs::msg::PoseStamped> mPosePath;
@@ -1058,11 +1357,10 @@ private:
   sl::LatLng mLastLatLongPose;
   double mLastHeading;
   tf2::Quaternion mLastHeadingQuat;
-  sl::ECEF mInitEcefPose;
-  sl::UTM mInitUtmPose;
   sl::LatLng mInitLatLongPose;
-  double mInitHeading;
   bool mGnssInitGood = false;
+  // Last GNSS fusion status logged, to log it on change only
+  sl::GNSS_FUSION_STATUS mGnssStatusLogged = sl::GNSS_FUSION_STATUS::LAST;
   sl::float3 mGnssAntennaPose;
   // <---- Positional Tracking
 
@@ -1107,7 +1405,8 @@ private:
   sl_tools::StopWatch mPoseFreqTimer;
   sl_tools::StopWatch mPcPubFreqTimer;
   sl_tools::StopWatch mVdPubFreqTimer;
-  sl_tools::StopWatch mSensPubFreqTimer;
+  // Last camera infos published by the grab thread without video/depth subscribers
+  std::chrono::steady_clock::time_point mCamInfoLastPub;
   sl_tools::StopWatch mOdFreqTimer;
   sl_tools::StopWatch mBtFreqTimer;
   sl_tools::StopWatch mPcFreqTimer;
@@ -1120,7 +1419,20 @@ private:
   sl::Timestamp mLastTs_grab = 0;  // Used to calculate stable publish frequency
   rclcpp::Time mFrameTimestamp;
   rclcpp::Time mGnssTimestamp;
-  rclcpp::Time mLastTs_imu;
+  rclcpp::Time mLastTs_imu;       // Timestamp of the last PUBLISHED IMU sample
+  rclcpp::Time mLastSeenTs_imu;   // Timestamp of the last IMU sample READ from the SDK
+  double mImuSamplePeriod = 0.0;  // Measured interval between IMU samples [sec] (0 = not yet known)
+
+  // Sensors subscriber counts, refreshed every SENS_SUB_COUNT_REFRESH_SEC
+  // instead of on every poll of the (multi-kHz) sensors thread
+  size_t mImuSubCountCache = 0;
+  size_t mImuRawSubCountCache = 0;
+  size_t mImuMagSubCountCache = 0;
+  size_t mPressSubCountCache = 0;
+  std::chrono::steady_clock::time_point mSensSubCountLastCheck;
+  bool mSensSubCountInit = false;
+  std::atomic<bool> mSensDataUnavailable{false};  // The input has no sensors data to publish
+  bool mSensDataReceived = false;  // At least one sensors sample was read from the input
   rclcpp::Time mLastTs_baro;
   rclcpp::Time mLastTs_mag;
   rclcpp::Time mLastTs_odom;
@@ -1137,6 +1449,9 @@ private:
   unsigned int mSvoRecFramerate = 0;
   bool mSvoRecTranscode = false;
   std::string mSvoRecFilename;
+#if (ZED_SDK_MAJOR_VERSION * 10 + ZED_SDK_MINOR_VERSION) >= 53
+  sl::SVO_ENCODING_PRESET mSvoRecEncodingPreset = sl::SVO_ENCODING_PRESET::DEFAULT;
+#endif
   // <---- SVO Recording parameters
 
   // ----> Services
@@ -1150,6 +1465,7 @@ private:
   enableMappingPtr mEnableMappingSrv;
   startSvoRecSrvPtr mStartSvoRecSrv;
   stopSvoRecSrvPtr mStopSvoRecSrv;
+  pauseSvoRecSrvPtr mPauseSvoRecSrv;
   pauseSvoSrvPtr mPauseSvoSrv;
   setSvoFramePtr mSetSvoFrameSrv;
   setRoiSrvPtr mSetRoiSrv;
@@ -1157,6 +1473,7 @@ private:
   toLLSrvPtr mToLlSrv;
   fromLLSrvPtr mFromLlSrv;
   enableStreamingPtr mEnableStreamingSrv;
+  rebootSrvPtr mRebootSrv;
 
   sl_tools::StopWatch mSetSvoFrameCheckTimer;
   // <---- Services
@@ -1173,16 +1490,19 @@ private:
   const std::string mSrvEnableStreamingName = "enable_streaming";
   const std::string mSrvStartSvoRecName = "start_svo_rec";
   const std::string mSrvStopSvoRecName = "stop_svo_rec";
+  const std::string mSrvPauseSvoRecName = "pause_svo_rec";
   const std::string mSrvToggleSvoPauseName = "toggle_svo_pause";
   const std::string mSrvSetSvoFrameName = "set_svo_frame";
   const std::string mSrvSetRoiName = "set_roi";
   const std::string mSrvResetRoiName = "reset_roi";
   const std::string mSrvToLlName = "toLL";  // Convert from `map` to `Lat Long`
   const std::string mSrvFromLlName = "fromLL";  // Convert from `Lat Long` to `map`
+  const std::string mSrvRebootName = "reboot_camera";
   // <---- Services names
 
   // ----> SVO v2
   std::unique_ptr<sl_tools::GNSSReplay> mGnssReplay;
+  uint64_t mGnssReplayLastTs = 0;  // Timestamp of the last pose used for GNSS replay
   // <---- SVO v2
 };
 
